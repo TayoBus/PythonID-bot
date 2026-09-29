@@ -7,6 +7,7 @@ A comprehensive Telegram bot for managing group members with profile verificatio
 ### Core Monitoring
 - Monitors all messages in one or more configured groups
 - **Multi-group support**: Manage multiple groups from a single bot instance with isolated per-group settings via `groups.json`
+- **AI moderation monitor**: Multi-label classification (spam, scam, hostile, trolling, explicit, doxxing) via classifier.dev runs as the last defense on messages that survived all other handlers; high-confidence flags are reported to the admin chat with delete/restrict/ban buttons (monitor-only, never auto-enforces)
 - Checks if users have a public profile picture
 - Checks if users have a username set
 - Sends warnings to a dedicated topic (thread) for non-compliant users

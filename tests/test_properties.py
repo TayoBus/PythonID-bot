@@ -14,7 +14,9 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from bot.constants import format_hours_display, format_threshold_display
+from bot.handlers.ai_spam_monitor import flagged_aspects
 from bot.handlers.trust import _format_person, _format_person_with_username
+from bot.services.classifier_client import ClassificationResult
 from bot.services.telegram_utils import is_url_whitelisted
 
 # Strategies -----------------------------------------------------------------
@@ -205,6 +207,90 @@ class TestIsUrlWhitelisted:
     def test_known_whitelisted_urls(self, url: str) -> None:
         """The known tech-domain whitelist definitely matches these."""
         assert is_url_whitelisted(url) is True
+
+
+# flagged_aspects ----------------------------------------------------------------
+
+aspect_st = st.sampled_from(
+    ["spam", "scam", "hostile", "trolling", "explicit", "doxxing", "benign"]
+)
+rogue_label_st = st.text(
+    alphabet=st.characters(whitelist_categories=("L",), max_codepoint=127),
+    min_size=1,
+    max_size=12,
+).filter(
+    lambda s: s not in {"spam", "scam", "hostile", "trolling", "explicit", "doxxing", "benign"}
+)
+valid_labels_st = st.tuples(
+    st.sampled_from(["spam", "scam", "hostile", "trolling", "explicit", "doxxing"]),
+    st.sampled_from(["spam", "scam", "hostile", "trolling", "explicit", "doxxing"]),
+).map(lambda pair: tuple(dict.fromkeys(pair + ("benign",))))
+scores_st = st.dictionaries(
+    st.one_of(aspect_st, rogue_label_st),
+    st.floats(min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False),
+    min_size=1,
+    max_size=5,
+)
+threshold_st = st.floats(
+    min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False
+)
+
+
+class TestFlaggedAspects:
+    @given(scores_st, threshold_st, valid_labels_st)
+    @settings(max_examples=200)
+    def test_flags_exactly_requested_non_benign_scores_at_or_above_threshold(
+        self,
+        scores: dict[str, float],
+        threshold: float,
+        valid_labels: tuple[str, ...],
+    ) -> None:
+        """flagged_aspects returns exactly the requested, non-benign labels
+        scoring >= threshold; unexpected API labels never flag."""
+        result = ClassificationResult(label="x", confidence=None, scores=scores)
+        flagged = flagged_aspects(result, threshold, valid_labels)
+        flagged_labels = [label for label, _ in flagged]
+        assert "benign" not in flagged_labels
+        expected = {
+            label
+            for label, score in scores.items()
+            if label in valid_labels and label != "benign" and score >= threshold
+        }
+        assert set(flagged_labels) == expected
+
+    @given(scores_st, threshold_st, valid_labels_st)
+    @settings(max_examples=200)
+    def test_flags_sorted_highest_score_first(
+        self,
+        scores: dict[str, float],
+        threshold: float,
+        valid_labels: tuple[str, ...],
+    ) -> None:
+        """Flagged aspects come back in descending score order."""
+        result = ClassificationResult(label="x", confidence=None, scores=scores)
+        flagged = flagged_aspects(result, threshold, valid_labels)
+        flag_scores = [score for _, score in flagged]
+        assert flag_scores == sorted(flag_scores, reverse=True)
+        for label, score in flagged:
+            assert abs(scores[label] - score) < 1e-12
+
+    @given(st.floats(min_value=0.0, max_value=1.0, allow_nan=False))
+    @settings(max_examples=200)
+    def test_benign_only_is_never_flagged(self, score: float) -> None:
+        """A pure benign result produces no flags at any threshold."""
+        result = ClassificationResult(
+            label="benign", confidence=score, scores={"benign": score}
+        )
+        assert flagged_aspects(result, 0.0, ("spam", "scam", "hostile", "trolling", "explicit", "doxxing", "benign")) == []
+
+    @given(threshold_st)
+    @settings(max_examples=200)
+    def test_legacy_single_label_path_follows_whitelist(self, threshold: float) -> None:
+        """Without per-label scores, only requested non-benign labels with
+        confidence >= threshold flag."""
+        spam = ClassificationResult(label="spam", confidence=threshold)
+        assert flagged_aspects(spam, threshold, ("spam", "benign")) == [("spam", threshold)]
+        assert flagged_aspects(spam, threshold, ("hostile", "benign")) == []
 
 
 # Healthcheck to make sure the strategies are reasonable

@@ -312,3 +312,145 @@ class TestClassifyText:
             await classify_text("halo", labels=["spam"])
         assert state.consecutive_failures == 0
         assert state.opened_at is None
+
+    async def test_non_dict_result_returns_none(self):
+        payload = {"results": ["spam"]}
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            assert await classify_text("halo", labels=["spam"]) is None
+
+    async def test_non_dict_response_returns_none(self):
+        client = make_client(make_response(200, [{"label": "spam"}]))
+        with patch.object(classifier_client, "_client", client):
+            assert await classify_text("halo", labels=["spam"]) is None
+
+    async def test_multi_label_payload(self):
+        payload = {
+            "results": [
+                {
+                    "labels": ["spam"],
+                    "scores": {"spam": 0.97, "hostile": 0.01},
+                    "model": "jev-1.13.0",
+                }
+            ]
+        }
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            await classify_text(
+                "halo",
+                labels=["spam", "hostile", "trolling", "benign"],
+                multi=True,
+                max_labels=3,
+            )
+        body = client.post.await_args.kwargs["json"]
+        assert body["multi"] is True
+        assert body["max_labels"] == 3
+
+    async def test_multi_label_success(self):
+        payload = {
+            "results": [
+                {
+                    # "phishing" qualifies per the API but has no score entry;
+                    # it must be filtered out of `labels`.
+                    "labels": ["spam", "hostile", "phishing"],
+                    "scores": {
+                        "spam": 0.97,
+                        "hostile": 0.91,
+                        "trolling": 0.13,
+                        "benign": 0.01,
+                    },
+                    "model": "jev-1.13.0",
+                }
+            ]
+        }
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            result = await classify_text(
+                "halo", labels=["spam", "hostile", "trolling", "benign"], multi=True
+            )
+        assert result == ClassificationResult(
+            label="spam",
+            confidence=0.97,
+            model="jev-1.13.0",
+            labels=["spam", "hostile"],
+            scores={"spam": 0.97, "hostile": 0.91, "trolling": 0.13, "benign": 0.01},
+        )
+
+    async def test_multi_label_falls_back_to_single_label_shape(self):
+        payload = {"results": [{"label": "spam", "confidence": 0.9, "model": "jev-1.13.0"}]}
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            result = await classify_text("halo", labels=["spam"], multi=True)
+        assert result == ClassificationResult(
+            label="spam", confidence=0.9, model="jev-1.13.0"
+        )
+
+    async def test_multi_label_empty_labels_falls_back_to_top_score(self):
+        payload = {
+            "results": [
+                {
+                    "labels": [],
+                    "scores": {"spam": 0.4, "hostile": 0.6, "benign": 0.65},
+                    "model": "jev-1.13.0",
+                }
+            ]
+        }
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            result = await classify_text("halo", labels=["spam"], multi=True)
+        assert result is not None
+        assert result.labels == []
+        assert result.label == "benign"
+        assert result.confidence == 0.65
+
+    async def test_multi_label_missing_scores_returns_none(self):
+        payload = {"results": [{"labels": ["spam"], "model": "jev-1.13.0"}]}
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            assert await classify_text("halo", labels=["spam"], multi=True) is None
+
+    async def test_multi_label_missing_labels_returns_none(self):
+        payload = {
+            "results": [{"scores": {"spam": 0.9}, "model": "jev-1.13.0"}]
+        }
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            assert await classify_text("halo", labels=["spam"], multi=True) is None
+
+    async def test_multi_label_no_usable_scores_returns_none(self):
+        payload = {
+            "results": [
+                {
+                    "labels": ["spam"],
+                    "scores": {"spam": "very high", "benign": None},
+                    "model": "jev-1.13.0",
+                }
+            ]
+        }
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            assert await classify_text("halo", labels=["spam"], multi=True) is None
+
+    async def test_multi_label_filters_non_numeric_scores(self):
+        payload = {
+            "results": [
+                {
+                    "labels": ["spam"],
+                    "scores": {"spam": 0.97, "hostile": "oops", "benign": 0.02},
+                }
+            ]
+        }
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            result = await classify_text("halo", labels=["spam"], multi=True)
+        assert result is not None
+        assert result.scores == {"spam": 0.97, "benign": 0.02}
+
+    async def test_max_labels_without_multi_still_sent(self):
+        payload = {"results": [{"label": "spam", "confidence": 0.9}]}
+        client = make_client(make_response(200, payload))
+        with patch.object(classifier_client, "_client", client):
+            await classify_text("halo", labels=["spam"], max_labels=2)
+        body = client.post.await_args.kwargs["json"]
+        assert body["max_labels"] == 2
+        assert "multi" not in body
