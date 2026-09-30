@@ -16,6 +16,7 @@ from bot.handlers.ai_spam_monitor import (
     ACTION_DELETE_RESTRICT,
     ACTION_DISMISS,
     ALERTS_KEY,
+    flagged_aspects,
     handle_ai_spam_action,
     handle_ai_spam_monitor,
     truncate_alert_text,
@@ -56,7 +57,29 @@ def make_group_config(alert_chat_id: int | None = ALERT_CHAT_ID) -> GroupConfig:
 
 
 def make_spam_result(confidence: float | None = 0.97) -> ClassificationResult:
-    return ClassificationResult(label="spam", confidence=confidence, model="jev-1.13.0")
+    result = ClassificationResult(label="spam", confidence=confidence, model="jev-1.13.0")
+    if confidence is not None:
+        result.labels = ["spam"]
+        result.scores = {"spam": confidence, "hostile": 0.01, "trolling": 0.02, "benign": 0.02}
+    return result
+
+
+def make_multi_result(
+    scores: dict[str, float], labels: list[str] | None = None
+) -> ClassificationResult:
+    qualifying = (
+        labels
+        if labels is not None
+        else [label for label, score in scores.items() if score >= 0.7]
+    )
+    top = max(scores, key=scores.get)
+    return ClassificationResult(
+        label=qualifying[0] if qualifying else top,
+        confidence=scores[qualifying[0]] if qualifying else scores[top],
+        model="jev-1.13.0",
+        labels=qualifying,
+        scores=scores,
+    )
 
 
 def make_context() -> MagicMock:
@@ -275,6 +298,104 @@ class TestClassifyAndAlert:
         await self.alert_on(context, result=result)
         context.bot.send_message.assert_not_awaited()
 
+    async def test_sends_multi_aspect_alert(self, context):
+        result = make_multi_result(
+            {"spam": 0.97, "hostile": 0.91, "trolling": 0.1, "benign": 0.01}
+        )
+        await self.alert_on(context, result=result)
+        context.bot.send_message.assert_awaited_once()
+        text = context.bot.send_message.await_args.kwargs["text"]
+        assert "Alasan: spam (97%), hostile (91%)" in text
+        assert "Model: jev-1.13.0" in text
+
+    async def test_sends_hostile_only_alert(self, context):
+        result = make_multi_result(
+            {"spam": 0.02, "hostile": 0.95, "trolling": 0.1, "benign": 0.03}
+        )
+        await self.alert_on(context, result=result)
+        context.bot.send_message.assert_awaited_once()
+        text = context.bot.send_message.await_args.kwargs["text"]
+        assert "Alasan: hostile (95%)" in text
+        assert "spam (" not in text
+
+    async def test_sends_scam_only_alert(self, context):
+        result = make_multi_result(
+            {"spam": 0.05, "scam": 0.96, "hostile": 0.1, "benign": 0.02}
+        )
+        await self.alert_on(context, result=result)
+        context.bot.send_message.assert_awaited_once()
+        text = context.bot.send_message.await_args.kwargs["text"]
+        assert "Alasan: scam (96%)" in text
+        assert "spam (" not in text
+
+    async def test_sends_explicit_and_doxxing_alert(self, context):
+        result = make_multi_result(
+            {"explicit": 0.93, "doxxing": 0.91, "benign": 0.05}
+        )
+        await self.alert_on(context, result=result)
+        context.bot.send_message.assert_awaited_once()
+        text = context.bot.send_message.await_args.kwargs["text"]
+        assert "Alasan: explicit (93%), doxxing (91%)" in text
+
+    async def test_alert_ignores_unexpected_api_labels(self, context):
+        result = make_multi_result(
+            {"spam": 0.97, "phishing": 0.99, "benign": 0.01},
+            labels=["spam", "phishing"],
+        )
+        await self.alert_on(context, result=result)
+        context.bot.send_message.assert_awaited_once()
+        text = context.bot.send_message.await_args.kwargs["text"]
+        assert "Alasan: spam (97%)" in text
+        assert "phishing" not in text
+
+    async def test_no_alert_for_benign_only(self, context):
+        result = make_multi_result(
+            {"spam": 0.02, "hostile": 0.01, "trolling": 0.02, "benign": 0.97}
+        )
+        await self.alert_on(context, result=result)
+        context.bot.send_message.assert_not_awaited()
+
+    async def test_no_alert_when_only_hostile_below_threshold(self, context):
+        result = make_multi_result(
+            {"spam": 0.02, "hostile": 0.5, "trolling": 0.02, "benign": 0.4}
+        )
+        await self.alert_on(context, result=result)
+        context.bot.send_message.assert_not_awaited()
+
+    async def test_classify_called_with_multi_label_request(self, context):
+        classify_mock = AsyncMock(return_value=make_spam_result())
+        with (
+            patch("bot.handlers.ai_spam_monitor.classify_text", new=classify_mock),
+            patch("bot.handlers.ai_spam_monitor.get_settings", return_value=make_settings()),
+            patch("bot.handlers.ai_spam_monitor.get_group_registry") as mock_registry,
+            patch(
+                "bot.handlers.ai_spam_monitor.check_user_profile",
+                new=AsyncMock(return_value=ProfileCheckResult(True, True)),
+            ),
+        ):
+            mock_registry.return_value.get.return_value = make_group_config(ALERT_CHAT_ID)
+            await ai_spam_monitor._classify_and_alert(
+                context,
+                group_id=GROUP_ID,
+                user=make_update().effective_user,
+                message_id=100,
+                message_text=LONG_TEXT,
+            )
+        kwargs = classify_mock.await_args.kwargs
+        assert kwargs["multi"] is True
+        assert kwargs["max_labels"] == 6
+        assert kwargs["labels"] == [
+            "spam",
+            "scam",
+            "hostile",
+            "trolling",
+            "explicit",
+            "doxxing",
+            "benign",
+        ]
+        assert "Hostile berarti" in kwargs["instructions"]
+        assert "Scam berarti" in kwargs["instructions"]
+
     async def test_no_alert_without_alert_chat(self, context):
         await self.alert_on(context, alert_chat_id=None)
         context.bot.send_message.assert_not_awaited()
@@ -294,8 +415,49 @@ class TestClassifyAndAlert:
         assert "ai_spam_monitor: group=" in caplog.text
         assert "username=@testuser" in caplog.text
         assert "name='Test User'" in caplog.text
-        assert "label=spam" in caplog.text
+        assert "labels=['spam']" in caplog.text
+        assert "flags=spam (97%)" in caplog.text
         assert f"text={LONG_TEXT!r}" in caplog.text
+
+    async def test_log_truncates_long_message_text(self, context, caplog):
+        long_text = "x" * 600
+        update = make_update(text=long_text)
+        with (
+            patch("bot.handlers.ai_spam_monitor.classify_text", new=AsyncMock(return_value=None)),
+            patch("bot.handlers.ai_spam_monitor.get_settings", return_value=make_settings()),
+            patch("bot.handlers.ai_spam_monitor.get_group_registry") as mock_registry,
+            caplog.at_level(logging.INFO),
+        ):
+            mock_registry.return_value.get.return_value = make_group_config()
+            await ai_spam_monitor._classify_and_alert(
+                context,
+                group_id=GROUP_ID,
+                user=update.effective_user,
+                message_id=100,
+                message_text=long_text,
+            )
+        assert long_text not in caplog.text
+        assert f"text={truncate_alert_text(long_text)!r}" in caplog.text
+
+    async def test_log_shows_none_for_user_without_username(self, context, caplog):
+        update = make_update()
+        update.effective_user.username = None
+        with (
+            patch("bot.handlers.ai_spam_monitor.classify_text", new=AsyncMock(return_value=None)),
+            patch("bot.handlers.ai_spam_monitor.get_settings", return_value=make_settings()),
+            patch("bot.handlers.ai_spam_monitor.get_group_registry") as mock_registry,
+            caplog.at_level(logging.INFO),
+        ):
+            mock_registry.return_value.get.return_value = make_group_config()
+            await ai_spam_monitor._classify_and_alert(
+                context,
+                group_id=GROUP_ID,
+                user=update.effective_user,
+                message_id=100,
+                message_text=LONG_TEXT,
+            )
+        assert "username=none" in caplog.text
+        assert "@None" not in caplog.text
 
     async def test_no_alert_without_registry_group(self, context):
         with (
@@ -423,6 +585,57 @@ def make_callback_update(action: str, admin_id: int = 1) -> MagicMock:
     update.callback_query.answer = AsyncMock()
     update.callback_query.edit_message_text = AsyncMock()
     return update
+
+
+class TestFlaggedAspects:
+    """Unit tests for the pure flagged_aspects helper."""
+
+    LABELS = ("spam", "scam", "hostile", "trolling", "explicit", "doxxing", "benign")
+
+    def test_multi_label_flags_all_above_threshold_sorted_desc(self):
+        result = make_multi_result(
+            {"spam": 0.91, "hostile": 0.98, "trolling": 0.1, "benign": 0.01}
+        )
+        assert flagged_aspects(result, 0.9, self.LABELS) == [("hostile", 0.98), ("spam", 0.91)]
+
+    def test_multi_label_boundary_score_is_flagged(self):
+        result = make_multi_result({"spam": 0.9, "benign": 0.1})
+        assert flagged_aspects(result, 0.9, self.LABELS) == [("spam", 0.9)]
+
+    def test_multi_label_never_flags_benign(self):
+        result = make_multi_result({"benign": 1.0})
+        assert flagged_aspects(result, 0.0, self.LABELS) == []
+
+    def test_multi_label_empty_when_all_below_threshold(self):
+        result = make_multi_result({"spam": 0.5, "hostile": 0.6, "benign": 0.4})
+        assert flagged_aspects(result, 0.9, self.LABELS) == []
+
+    def test_multi_label_ignores_unexpected_labels(self):
+        result = make_multi_result(
+            {"spam": 0.97, "phishing": 0.99, "benign": 0.01},
+            labels=["spam", "phishing"],
+        )
+        assert flagged_aspects(result, 0.9, self.LABELS) == [("spam", 0.97)]
+
+    def test_legacy_single_label_spam_path(self):
+        result = ClassificationResult(label="spam", confidence=0.95)
+        assert flagged_aspects(result, 0.9, self.LABELS) == [("spam", 0.95)]
+
+    def test_legacy_single_label_flags_any_requested_aspect(self):
+        result = ClassificationResult(label="hostile", confidence=0.95)
+        assert flagged_aspects(result, 0.9, self.LABELS) == [("hostile", 0.95)]
+
+    def test_legacy_single_label_ignores_unrequested_label(self):
+        result = ClassificationResult(label="not spam", confidence=1.0)
+        assert flagged_aspects(result, 0.9, self.LABELS) == []
+
+    def test_legacy_single_label_null_confidence_is_empty(self):
+        result = ClassificationResult(label="spam", confidence=None)
+        assert flagged_aspects(result, 0.9, self.LABELS) == []
+
+    def test_legacy_single_label_below_threshold_is_empty(self):
+        result = ClassificationResult(label="spam", confidence=0.5)
+        assert flagged_aspects(result, 0.9, self.LABELS) == []
 
 
 class TestHandleAiSpamAction:

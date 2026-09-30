@@ -439,25 +439,48 @@ BIO_BAIT_MONITOR_ALERT = (
 )
 
 # --- AI spam monitor (classifier.dev) ---
+# One multi-label classification covers all moderation aspects in a single
+# API call (still 1 classification of daily budget). "benign" is the
+# negative anchor so clean messages have somewhere to land.
+AI_SPAM_LABELS: tuple[str, ...] = (
+    "spam",
+    "scam",
+    "hostile",
+    "trolling",
+    "explicit",
+    "doxxing",
+    "benign",
+)
 
-AI_SPAM_LABELS: tuple[str, ...] = ("spam", "not spam")
+# Cap on how many qualifying labels the API returns per call. Alerts use
+# the full per-label scores map, so this never drops an aspect.
+AI_SPAM_MAX_LABELS = 6
 
 # Static criteria passed to the classifier as `instructions`. Text-only:
 # profile metadata is never sent to the API.
 AI_SPAM_INSTRUCTIONS = (
     "Spam berarti promosi atau iklan tanpa diminta, ajakan DM berbayar, "
     "jasa ilegal (misal jasa pencarian data orang), atau link promo "
-    "mencurigakan. Pengumuman acara komunitas, diskusi teknis, tanya jawab, "
-    "dan obrolan sehari-hari BUKAN spam."
+    "mencurigakan. Scam berarti penipuan: giveaway palsu, tawaran investasi "
+    "atau kripto palsu, phishing, dan janji keuntungan tidak realistis. "
+    "Hostile berarti hinaan atau serangan pribadi, ancaman, pelecehan, "
+    "atau ujaran kebencian terhadap anggota. Trolling berarti umpan "
+    "provokasi yang disengaja, adu domba, atau pengalihan topik yang "
+    "disengaja. Explicit berarti konten seksual atau pornografi, termasuk "
+    "link atau ajakan ke konten dewasa. Doxxing berarti membagikan data "
+    "pribadi orang lain tanpa izin: nomor telepon, alamat, foto KTP, atau "
+    "identitas pribadi lainnya. Pengumuman acara komunitas, diskusi "
+    "teknis, tanya jawab, dan obrolan sehari-hari yang sopan adalah benign."
 )
 
-# Alert sent to ai_spam_alert_chat_id when a high-confidence spam message
-# is detected. Sent without parse_mode to preserve raw message content.
+# Alert sent to ai_spam_alert_chat_id when a high-confidence moderation
+# flag is detected. Sent without parse_mode to preserve raw message content.
 AI_SPAM_ALERT = (
     "[AI SPAM MONITOR]\n"
     "Grup ID: {group_id}\n"
     "Pengirim: {user_mention} (ID: {user_id})\n"
-    "Keyakinan: {confidence} ({model})\n"
+    "Alasan: {flags}\n"
+    "Model: {model}\n"
     "Profil: {profile_status}\n"
     "Pesan:\n{message_text}"
 )

@@ -1,13 +1,15 @@
 """
-AI-based spam monitoring via classifier.dev (monitor-only).
+AI-based moderation monitoring via classifier.dev (monitor-only).
 
 Messages that survive every enforcement handler reach this handler last
 (handler_group 7). Text is classified in a background task so the update
-pipeline is never blocked by the network call. High-confidence results
-are reported to the configured admin chat (``ai_spam_alert_chat_id``)
-with inline buttons so a human admin can delete, delete+restrict,
-delete+ban, or dismiss. This handler never deletes, restricts, or warns
-on its own and raises no ``ApplicationHandlerStop``.
+pipeline is never blocked by the network call. One multi-label
+classification covers the spam, hostile, and trolling aspects at once
+(see ``AI_SPAM_LABELS``). High-confidence flags are reported to the
+configured admin chat (``ai_spam_alert_chat_id``) with inline buttons so
+a human admin can delete, delete+restrict, delete+ban, or dismiss. This
+handler never deletes, restricts, or warns on its own and raises no
+``ApplicationHandlerStop``.
 
 Profile metadata (photo/username) is fetched locally for the alert only;
 it is never sent to the classification API.
@@ -32,11 +34,13 @@ from bot.constants import (
     AI_SPAM_CB_NOT_ADMIN,
     AI_SPAM_INSTRUCTIONS,
     AI_SPAM_LABELS,
+    AI_SPAM_MAX_LABELS,
     RESTRICTED_PERMISSIONS,
 )
 from bot.group_config import get_group_registry
 from bot.services.classifier_client import (
     DEFAULT_DAILY_BUDGET,
+    ClassificationResult,
     breaker_is_open,
     classify_text,
     daily_budget_exhausted,
@@ -132,6 +136,34 @@ async def _fetch_profile_status(
         return "tidak diketahui"
 
 
+def flagged_aspects(
+    result: ClassificationResult, threshold: float, valid_labels: tuple[str, ...]
+) -> list[tuple[str, float]]:
+    """Return non-benign aspects at or above ``threshold``, highest score first.
+
+    Multi-label results carry independent per-label ``scores``. Only labels
+    the caller requested (``valid_labels``) can flag — an unexpected label
+    in the API response never reaches the alert — and the benign anchor
+    never flags. Single-label (legacy) results fall back to the
+    label + confidence check under the same whitelist.
+    """
+    flaggable = set(valid_labels) - {"benign"}
+    if result.scores:
+        flagged = [
+            (label, score)
+            for label, score in result.scores.items()
+            if label in flaggable and score >= threshold
+        ]
+        return sorted(flagged, key=lambda item: item[1], reverse=True)
+    if (
+        result.label in flaggable
+        and result.confidence is not None
+        and result.confidence >= threshold
+    ):
+        return [(result.label, result.confidence)]
+    return []
+
+
 async def _classify_and_alert(
     context: ContextTypes.DEFAULT_TYPE,
     group_id: int,
@@ -146,6 +178,10 @@ async def _classify_and_alert(
     from being hammered.
     """
     settings = get_settings()
+    # Log-friendly sender/text snippets: no "@None" for users without a
+    # handle, and truncated text so one long message can't bloat the logs.
+    username_display = f"@{user.username}" if user.username else "none"
+    text_snippet = truncate_alert_text(message_text)
     if breaker_is_open(
         time.monotonic(), cooldown_seconds=settings.classifier_cooldown_seconds
     ):
@@ -162,29 +198,28 @@ async def _classify_and_alert(
         labels=list(AI_SPAM_LABELS),
         instructions=AI_SPAM_INSTRUCTIONS,
         timeout=settings.classifier_timeout_seconds,
+        multi=True,
+        max_labels=AI_SPAM_MAX_LABELS,
     )
     if result is None:
         logger.info(
             f"ai_spam_monitor: classification failed for user_id={user.id} "
-            f"username=@{user.username} name={user.full_name!r} "
-            f"group={group_id} message_id={message_id} text={message_text!r}"
+            f"username={username_display} name={user.full_name!r} "
+            f"group={group_id} message_id={message_id} text={text_snippet!r}"
         )
         return
 
-    confidence_display = (
-        f"{result.confidence:.0%}" if result.confidence is not None else "n/a"
-    )
+    flags = flagged_aspects(result, settings.ai_spam_alert_threshold, AI_SPAM_LABELS)
+    flags_display = ", ".join(f"{label} ({score:.0%})" for label, score in flags)
     logger.info(
         f"ai_spam_monitor: group={group_id} user_id={user.id} "
-        f"username=@{user.username} name={user.full_name!r} "
-        f"message_id={message_id} label={result.label} "
-        f"confidence={confidence_display} model={result.model} "
-        f"text={message_text!r}"
+        f"username={username_display} name={user.full_name!r} "
+        f"message_id={message_id} labels={result.labels or [result.label]} "
+        f"flags={flags_display or '-'} model={result.model} "
+        f"text={text_snippet!r}"
     )
 
-    if result.label != "spam":
-        return
-    if result.confidence is None or result.confidence < settings.ai_spam_alert_threshold:
+    if not flags:
         return
 
     group_config = _get_group_config(context, group_id)
@@ -199,7 +234,7 @@ async def _classify_and_alert(
         group_id=group_id,
         user_mention=plain_mention(user),
         user_id=user.id,
-        confidence=confidence_display,
+        flags=flags_display,
         model=result.model or "classifier.dev",
         profile_status=profile_status,
         message_text=truncate_alert_text(message_text),

@@ -34,12 +34,17 @@ class ClassificationResult:
     """Single-input classification outcome.
 
     ``confidence`` is ``None`` when the upstream reports no calibrated
-    score (treat it as "not confident").
+    score (treat it as "not confident"). In multi-label mode ``labels``
+    carries every qualifying label (most likely first) and ``scores`` the
+    independent score of every label; ``label``/``confidence`` mirror the
+    top-scoring label so single-label call sites keep working.
     """
 
     label: str
     confidence: float | None
     model: str | None = None
+    labels: list[str] = field(default_factory=list)
+    scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -150,6 +155,65 @@ def try_spend_budget(limit: int = DEFAULT_DAILY_BUDGET) -> bool:
     return _budget.try_spend(limit)
 
 
+def _is_score(value: object) -> bool:
+    """True for numeric JSON scores; bools are not scores."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _parse_single_label_result(raw: dict[str, object]) -> ClassificationResult | None:
+    """Parse a single-label result dict; ``None`` on malformed input."""
+    label = raw.get("label")
+    if not isinstance(label, str):
+        logger.warning("classifier.dev response missing label field")
+        return None
+    confidence = raw.get("confidence")
+    if confidence is not None and not _is_score(confidence):
+        confidence = None
+    model = raw.get("model")
+    return ClassificationResult(
+        label=label,
+        confidence=float(confidence) if confidence is not None else None,
+        model=model if isinstance(model, str) else None,
+    )
+
+
+def _parse_multi_label_result(raw: dict[str, object]) -> ClassificationResult | None:
+    """Parse a multi-label result dict; ``None`` on malformed input.
+
+    The API returns ``labels`` (every label scoring >= 0.7, most likely
+    first) and ``scores`` (the independent score of every label). When
+    no label qualifies, the top-scoring label still anchors
+    ``label``/``confidence``.
+    """
+    raw_labels = raw.get("labels")
+    raw_scores = raw.get("scores")
+    if not isinstance(raw_labels, list) or not all(
+        isinstance(label, str) for label in raw_labels
+    ):
+        logger.warning("classifier.dev multi-label response missing labels list")
+        return None
+    if not isinstance(raw_scores, dict):
+        logger.warning("classifier.dev multi-label response missing scores map")
+        return None
+    scores: dict[str, float] = {}
+    for key, value in raw_scores.items():
+        if isinstance(key, str) and _is_score(value):
+            scores[key] = float(value)
+    if not scores:
+        logger.warning("classifier.dev multi-label response has no usable scores")
+        return None
+    labels = [label for label in raw_labels if label in scores]
+    top = labels[0] if labels else max(scores, key=scores.get)
+    model = raw.get("model")
+    return ClassificationResult(
+        label=top,
+        confidence=scores[top],
+        model=model if isinstance(model, str) else None,
+        labels=labels,
+        scores=scores,
+    )
+
+
 async def classify_text(
     text: str,
     *,
@@ -157,9 +221,14 @@ async def classify_text(
     instructions: str | None = None,
     api_url: str = CLASSIFIER_API_URL,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    multi: bool = False,
+    max_labels: int | None = None,
 ) -> ClassificationResult | None:
     """Classify one text via the classifier.dev fast tier.
 
+    With ``multi=True`` the API returns every matching label (plus
+    independent per-label scores) in a single classification. ``max_labels``
+    caps how many qualifying labels are returned; it is only sent when set.
     Returns ``None`` on any failure (timeout, HTTP error, rate limit,
     malformed response). Never raises.
     """
@@ -167,6 +236,10 @@ async def classify_text(
     payload: dict[str, object] = {"input": text, "labels": labels}
     if instructions:
         payload["instructions"] = instructions
+    if multi:
+        payload["multi"] = True
+    if max_labels is not None:
+        payload["max_labels"] = max_labels
     try:
         if _client is None:
             _client = _get_client()
@@ -181,21 +254,20 @@ async def classify_text(
             )
             return None
         data = response.json()
-        result = data["results"][0]
-        label = result.get("label")
-        if not isinstance(label, str):
-            logger.warning("classifier.dev response missing label field")
+        raw = data["results"][0]
+        if not isinstance(raw, dict):
+            raise ValueError("classifier.dev result is not an object")
+        if multi:
+            # If the upstream ignores multi and answers in single-label
+            # shape, fall back to the single-label parser instead of going
+            # dark while still spending budget.
+            result = _parse_multi_label_result(raw) or _parse_single_label_result(raw)
+        else:
+            result = _parse_single_label_result(raw)
+        if result is None:
             return None
-        confidence = result.get("confidence")
-        if confidence is not None and not isinstance(confidence, (int, float)):
-            confidence = None
-        model = result.get("model")
         circuit_on_success(_circuit)
-        return ClassificationResult(
-            label=label,
-            confidence=float(confidence) if confidence is not None else None,
-            model=model if isinstance(model, str) else None,
-        )
+        return result
     except (TimeoutError, asyncio.TimeoutError):
         circuit_on_failure(_circuit, time.monotonic())
         logger.warning("classifier.dev request timed out")
