@@ -419,6 +419,46 @@ class TestClassifyAndAlert:
         assert "flags=spam (97%)" in caplog.text
         assert f"text={LONG_TEXT!r}" in caplog.text
 
+    async def test_log_truncates_long_message_text(self, context, caplog):
+        long_text = "x" * 600
+        update = make_update(text=long_text)
+        with (
+            patch("bot.handlers.ai_spam_monitor.classify_text", new=AsyncMock(return_value=None)),
+            patch("bot.handlers.ai_spam_monitor.get_settings", return_value=make_settings()),
+            patch("bot.handlers.ai_spam_monitor.get_group_registry") as mock_registry,
+            caplog.at_level(logging.INFO),
+        ):
+            mock_registry.return_value.get.return_value = make_group_config()
+            await ai_spam_monitor._classify_and_alert(
+                context,
+                group_id=GROUP_ID,
+                user=update.effective_user,
+                message_id=100,
+                message_text=long_text,
+            )
+        assert long_text not in caplog.text
+        assert f"text={truncate_alert_text(long_text)!r}" in caplog.text
+
+    async def test_log_shows_none_for_user_without_username(self, context, caplog):
+        update = make_update()
+        update.effective_user.username = None
+        with (
+            patch("bot.handlers.ai_spam_monitor.classify_text", new=AsyncMock(return_value=None)),
+            patch("bot.handlers.ai_spam_monitor.get_settings", return_value=make_settings()),
+            patch("bot.handlers.ai_spam_monitor.get_group_registry") as mock_registry,
+            caplog.at_level(logging.INFO),
+        ):
+            mock_registry.return_value.get.return_value = make_group_config()
+            await ai_spam_monitor._classify_and_alert(
+                context,
+                group_id=GROUP_ID,
+                user=update.effective_user,
+                message_id=100,
+                message_text=LONG_TEXT,
+            )
+        assert "username=none" in caplog.text
+        assert "@None" not in caplog.text
+
     async def test_no_alert_without_registry_group(self, context):
         with (
             patch("bot.handlers.ai_spam_monitor.classify_text", new=AsyncMock(return_value=make_spam_result())),

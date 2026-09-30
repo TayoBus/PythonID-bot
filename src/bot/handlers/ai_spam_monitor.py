@@ -178,6 +178,10 @@ async def _classify_and_alert(
     from being hammered.
     """
     settings = get_settings()
+    # Log-friendly sender/text snippets: no "@None" for users without a
+    # handle, and truncated text so one long message can't bloat the logs.
+    username_display = f"@{user.username}" if user.username else "none"
+    text_snippet = truncate_alert_text(message_text)
     if breaker_is_open(
         time.monotonic(), cooldown_seconds=settings.classifier_cooldown_seconds
     ):
@@ -200,8 +204,8 @@ async def _classify_and_alert(
     if result is None:
         logger.info(
             f"ai_spam_monitor: classification failed for user_id={user.id} "
-            f"username=@{user.username} name={user.full_name!r} "
-            f"group={group_id} message_id={message_id} text={message_text!r}"
+            f"username={username_display} name={user.full_name!r} "
+            f"group={group_id} message_id={message_id} text={text_snippet!r}"
         )
         return
 
@@ -209,10 +213,10 @@ async def _classify_and_alert(
     flags_display = ", ".join(f"{label} ({score:.0%})" for label, score in flags)
     logger.info(
         f"ai_spam_monitor: group={group_id} user_id={user.id} "
-        f"username=@{user.username} name={user.full_name!r} "
+        f"username={username_display} name={user.full_name!r} "
         f"message_id={message_id} labels={result.labels or [result.label]} "
         f"flags={flags_display or '-'} model={result.model} "
-        f"text={message_text!r}"
+        f"text={text_snippet!r}"
     )
 
     if not flags:
