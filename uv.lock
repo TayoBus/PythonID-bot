@@ -1810,7 +1810,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiogram", specifier = ">=3.31" },
-    { name = "apscheduler", specifier = ">=3.11" },
+    { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "logfire", specifier = ">=2.6.1" },
     { name = "pydantic", specifier = ">=2.12.5" },

@@ -189,7 +189,15 @@ def main() -> None:
 
     # Build the bot, shared state, and scheduler
     bot = Bot(token=settings.telegram_bot_token)
-    state = AppState(bot=bot, scheduler=AsyncIOScheduler())
+    # misfire_grace_time=None: never skip a late job. APScheduler 3's default
+    # is 1 second, which would silently drop captcha timeouts whenever the
+    # event loop is briefly busy (exactly when the bot is under load).
+    # PTB's JobQueue always ran late jobs; all three job types here are
+    # DB-guarded or idempotent, so running late is always safe.
+    state = AppState(
+        bot=bot,
+        scheduler=AsyncIOScheduler(job_defaults={"misfire_grace_time": None}),
+    )
     logger.info("Bot and application state built successfully")
 
     # Register all handler specs and jobs via PluginManager in deterministic order
