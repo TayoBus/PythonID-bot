@@ -10,7 +10,7 @@ To run just these tests: ``uv run pytest tests/test_properties.py -v``
 
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from bot.constants import format_hours_display, format_threshold_display
@@ -141,6 +141,9 @@ class TestFormatPerson:
     @settings(max_examples=200)
     def test_with_username_format(self, name: str, uid: int, username: str | None) -> None:
         """If username given, output contains ' (@<username>)' suffix when truthy."""
+        # The sentinel "(@" can also come from the name itself (the strategy
+        # allows punctuation), which says nothing about the username suffix.
+        assume("(@" not in name)
         result = _format_person_with_username(name, username, uid)
         if username:
             assert f"(@{username})" in result

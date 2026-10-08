@@ -34,6 +34,7 @@ from bot.constants import (
     TRUST_USER_ID_INVALID_MESSAGE,
     TRUST_USER_ID_REQUIRED_MESSAGE,
     TRUST_USER_NOT_FOUND_MESSAGE,
+    WIB,
 )
 from bot.database.models import TrustedUserData
 from bot.database.service import DatabaseService, get_database
@@ -90,16 +91,32 @@ def _plain_person(full_name: str, username: str | None, user_id: int) -> str:
     return display
 
 
-def _trusted_list_rich_html(rows: list[tuple[str, str, str, str]]) -> str:
+def _rich_user_cell(full_name: str, username: str | None, user_id: int) -> str:
+    """Render the User cell: display line plus the numeric ID below it.
+
+    Returns HTML (already escaped). The standalone "User ID" column was
+    dropped — four columns forced horizontal scrolling — so the ID is
+    folded in here, wrapped in <code> to stay visible and copyable.
+    """
+    return (
+        f"{html.escape(_plain_person(full_name, username, user_id))}"
+        f"<br><code>{user_id}</code>"
+    )
+
+
+def _trusted_list_rich_html(rows: list[tuple[str, str, str]]) -> str:
     """Render trusted-user rows as a native rich table (Bot API 10.1+).
 
     Follows the proven <table bordered striped> pattern: header row plus
-    one row per trusted user. All cell content is html-escaped.
+    one row per trusted user. ``rows`` are (user_cell_html, added_by, date);
+    the user cell is pre-rendered HTML (see _rich_user_cell); the other
+    cells are plain text and are html-escaped here.
     """
     header = "".join(f"<th>{html.escape(col)}</th>" for col in TRUST_LIST_RICH_COLUMNS)
     body = "".join(
-        "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>"
-        for row in rows
+        f"<tr><td>{user_cell}</td><td>{html.escape(added_by)}</td>"
+        f"<td>{html.escape(date)}</td></tr>"
+        for user_cell, added_by, date in rows
     )
     return (
         f"<b>{html.escape(TRUST_LIST_RICH_HEADING)}</b>"
@@ -305,7 +322,7 @@ async def handle_trusted_list_command(
         trusted_at = record.trusted_at
         if trusted_at.tzinfo is None:
             trusted_at = trusted_at.replace(tzinfo=UTC)
-        trusted_at_display = trusted_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        trusted_at_display = trusted_at.astimezone(WIB).strftime("%Y-%m-%d %H:%M WIB")
 
         user_display = _format_person_with_username(
             record.user_full_name, record.username, record.user_id
@@ -320,8 +337,7 @@ async def handle_trusted_list_command(
         )
         rich_rows.append(
             (
-                _plain_person(record.user_full_name, record.username, record.user_id),
-                str(record.user_id),
+                _rich_user_cell(record.user_full_name, record.username, record.user_id),
                 _plain_person(
                     record.admin_full_name,
                     record.admin_username,
