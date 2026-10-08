@@ -1,6 +1,7 @@
 """Tests for trusted user command handlers."""
 
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -349,19 +350,21 @@ class TestTrustCommands:
         rich_html = mock_context.bot.send_rich_message.call_args.kwargs[
             "rich_message"
         ].html
-        # Native striped table with the four columns.
+        # Native striped table with three columns (ID folded into User cell).
         assert "<table bordered striped>" in rich_html
-        for header in ("User", "User ID", "Added by", "Date"):
+        for header in ("User", "Added by", "Date"):
             assert f"<th>{header}</th>" in rich_html
-        # Same data the Markdown list used to show.
+        assert "<th>User ID</th>" not in rich_html
+        # Same data the Markdown list used to show; the numeric ID sits
+        # below the display line, wrapped in <code> to stay copyable.
         assert "Alice Trusted" in rich_html
         assert "alice_t" in rich_html
-        assert "8001" in rich_html
+        assert "<code>8001</code>" in rich_html
         assert "Admin One" in rich_html
         assert "Bob Trusted" in rich_html
-        assert "8002" in rich_html
-        # Timestamp present and UTC.
-        assert "UTC" in rich_html
+        assert "<code>8002</code>" in rich_html
+        # Timestamp present, converted to WIB.
+        assert "WIB" in rich_html
 
     async def test_trusted_list_command_rich_html_escapes(
         self, mock_update, mock_context
@@ -389,6 +392,23 @@ class TestTrustCommands:
         assert html_module.escape('Eve <b>&"evil"') in rich_html
         assert html_module.escape("eve<script>") in rich_html
         assert "<script>" not in rich_html
+
+    async def test_trusted_list_user_cell_folds_id_below_display(
+        self, mock_update, mock_context
+    ):
+        """User cell: display line, then the numeric ID below in <code>."""
+        from bot.handlers.trust import _rich_user_cell
+
+        cell = _rich_user_cell("Alice Trusted", "alice_t", 8001)
+        assert cell == "Alice Trusted (@alice_t)<br><code>8001</code>"
+
+        # No username: just the name, ID still folded below.
+        cell = _rich_user_cell("Bob Trusted", None, 8002)
+        assert cell == "Bob Trusted<br><code>8002</code>"
+
+        # Display text is escaped; the markup itself is not.
+        cell = _rich_user_cell("Eve <b>", "x&y", 8003)
+        assert cell == "Eve &lt;b&gt; (@x&amp;y)<br><code>8003</code>"
 
     async def test_trusted_list_command_empty_name_fallback(
         self, mock_update, mock_context
@@ -435,8 +455,43 @@ class TestTrustCommands:
             "Alice Trusted (@alice\\_t) (`8001`) — oleh "
             "Admin One (@admin\\_one) (`12345`)"
         ) in message
-        assert "UTC" in message
+        assert "WIB" in message
         assert reply_args.kwargs.get("parse_mode") == "Markdown"
+
+    async def test_trusted_list_date_shown_in_wib(self, mock_update, mock_context):
+        """The Date column converts the stored UTC time to WIB (+7)."""
+        from sqlmodel import Session, select
+
+        from bot.database.models import TrustedUser
+
+        db = get_database()
+        db.add_trusted_user(
+            TrustedUserData(
+                user_id=8001,
+                trusted_by_admin_id=12345,
+                user_full_name="Alice Trusted",
+                username="alice_t",
+                admin_full_name="Admin One",
+                admin_username="admin_one",
+            )
+        )
+        # Backdate the row: add_trusted_user always stamps now().
+        with Session(db._engine) as session:
+            record = session.exec(
+                select(TrustedUser).where(TrustedUser.user_id == 8001)
+            ).first()
+            record.trusted_at = datetime(2024, 10, 7, 11, 20, tzinfo=UTC)
+            session.add(record)
+            session.commit()
+
+        await handle_trusted_list_command(mock_update, mock_context)
+
+        rich_html = mock_context.bot.send_rich_message.call_args.kwargs[
+            "rich_message"
+        ].html
+        # 11:20 UTC == 18:20 WIB.
+        assert "2024-10-07 18:20 WIB" in rich_html
+        assert "UTC" not in rich_html
 
     async def test_trusted_list_command_fallback_markdown_escape(
         self, mock_update, mock_context

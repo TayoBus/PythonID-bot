@@ -215,10 +215,11 @@ group=7   # ai_spam_monitor: Runs LAST, classifier.dev AI spam monitoring (last 
 - Per-group kill switch: `"plugins": {"ai_spam_monitor": false}` / `"plugins": {"ai_spam_callback": false}` in groups.json; no alert chat configured → logfire-only monitoring
 
 ### Rich Text (DM Admin Commands)
-- Data-dense DM admin outputs use Bot API 10.1+ native rich messages (`context.bot.send_rich_message` with `aiogram.types.InputRichMessage(html=...)`); currently only `/trusted` (native `<table bordered striped>` with columns User | User ID | Added by | Date). Same pattern as the mediadownloadbot metadata table
-- Rich is the default with a **Markdown fallback**: any `send_rich_message` failure is caught (broad except, logged with `exc_info=True`) and the handler sends the pre-existing Markdown message instead — the Markdown path is never deleted, only demoted to fallback
+- Data-dense DM admin outputs use Bot API 10.1+ native rich messages (`context.bot.send_rich_message` with `aiogram.types.InputRichMessage(html=...)`); currently `/trusted` (native `<table bordered striped>` with columns User | Added by | Date — the numeric ID is folded into the User cell as `name (@user)<br><code>id</code>` since a 4th column forced horizontal scrolling) and `/status` (per-group striped table Grup | Penegakan | Captcha | Probation | Pending | Nonaktif plus a key-value section for uptime/database/job timestamps). Same pattern as the mediadownloadbot metadata table
+- Rich is the default with a **Markdown fallback**: any `send_rich_message` failure is caught (broad except, logged with `exc_info=True`) and the handler sends the pre-existing Markdown message instead — the Markdown path is never deleted, only demoted to fallback. `/check` deliberately stays on Markdown: aiogram 3.31 has no edit-to-rich equivalent, so its callback-query edit path could never go rich and a rich-then-Markdown flip mid-flow would be worse than consistent Markdown
 - Scope is DM-only admin surface: group-facing messages stay on Markdown v1, so member-visible output never changes and old clients are unaffected where it matters
-- Rich HTML content is `html.escape()`d (not the Markdown escaper); headings/column labels live in `constants.py` (`TRUST_LIST_RICH_HEADING`, `TRUST_LIST_RICH_COLUMNS`)
+- Rich HTML content is `html.escape()`d (not the Markdown escaper); headings/column labels live in `constants.py` (`TRUST_LIST_RICH_*`, `STATUS_RICH_*`)
+- All user-facing dates render in WIB (`constants.WIB = ZoneInfo("Asia/Jakarta")`), in both rich and Markdown paths
 
 ### Topic Guard Design
 - Handles both `message` and `edited_message` updates (combined filter)
