@@ -32,7 +32,8 @@ def mock_update():
     update.message.from_user.id = 12345
     update.message.from_user.full_name = "Admin User"
     update.message.from_user.is_bot = False
-    update.message.reply_text = AsyncMock()
+    update.message.reply = AsyncMock()
+    update.message.answer = AsyncMock()
     update.message.delete = AsyncMock()
     update.message.chat_id = -1001234567890
     update.message.message_id = 999
@@ -46,16 +47,15 @@ def mock_update():
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = MagicMock()
-    context.bot.send_message = AsyncMock()
-    context.bot.get_chat_member = AsyncMock()
-    context.bot_data = {
-        "admin_ids": [12345],
-        "group_admin_ids": {-1001234567890: [12345]},
-    }
-    context.args = []
-    return context
+    from bot.dispatch import AppState, HandlerContext
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.get_chat_member = AsyncMock()
+    state = AppState()
+    state.admin_ids = [12345]
+    state.group_admin_ids = {-1001234567890: [12345]}
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 def _make_target_user(user_id=67890, full_name="Bad Member", username="badmember"):
@@ -91,25 +91,23 @@ class TestHandleWarnCommand:
             await handle_warn_command(mock_update, mock_context)
 
         mock_context.bot.send_message.assert_not_called()
-        mock_update.message.reply_text.assert_not_called()
+        mock_update.message.answer.assert_not_called()
         mock_update.message.delete.assert_not_called()
 
     async def test_admin_of_other_group_silent_ignore(
         self, mock_update, mock_context, mock_registry
     ):
         """Admin of a different group is silently ignored in this group."""
-        mock_context.bot_data = {
-            "admin_ids": [12345],
-            "group_admin_ids": {
-                -1001234567890: [],
-                -1009876543210: [12345],
-            },
+        mock_context.state.admin_ids = [12345]
+        mock_context.state.group_admin_ids = {
+            -1001234567890: [],
+            -1009876543210: [12345],
         }
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
 
         mock_context.bot.send_message.assert_not_called()
-        mock_update.message.reply_text.assert_not_called()
+        mock_update.message.answer.assert_not_called()
         mock_update.message.delete.assert_not_called()
 
     async def test_reply_mode_with_reason(
@@ -193,10 +191,9 @@ class TestHandleWarnCommand:
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        reply_text = mock_update.message.reply_text.call_args
-        assert "bukan member" in reply_text.args[0]
-        assert reply_text.kwargs.get("do_quote") is False
+        mock_update.message.answer.assert_called_once()
+        reply_call = mock_update.message.answer.call_args
+        assert "bukan member" in reply_call.args[0]
         mock_context.bot.send_message.assert_not_called()
 
     async def test_id_mode_banned_member_shows_error(
@@ -210,8 +207,8 @@ class TestHandleWarnCommand:
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "bukan member" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.answer.assert_called_once()
+        assert "bukan member" in mock_update.message.answer.call_args.args[0]
         mock_context.bot.send_message.assert_not_called()
 
     async def test_no_reply_no_args_shows_usage(
@@ -221,9 +218,8 @@ class TestHandleWarnCommand:
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "Penggunaan" in mock_update.message.reply_text.call_args.args[0]
-        assert mock_update.message.reply_text.call_args.kwargs.get("do_quote") is False
+        mock_update.message.answer.assert_called_once()
+        assert "Penggunaan" in mock_update.message.answer.call_args.args[0]
         mock_context.bot.send_message.assert_not_called()
 
     async def test_invalid_user_id_shows_usage(
@@ -235,8 +231,8 @@ class TestHandleWarnCommand:
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "Penggunaan" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.answer.assert_called_once()
+        assert "Penggunaan" in mock_update.message.answer.call_args.args[0]
 
     async def test_get_chat_member_failure_shows_error(
         self, mock_update, mock_context, mock_registry
@@ -248,8 +244,8 @@ class TestHandleWarnCommand:
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "67890" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.answer.assert_called_once()
+        assert "67890" in mock_update.message.answer.call_args.args[0]
         mock_context.bot.send_message.assert_not_called()
 
     async def test_warn_bot_silent_ignore(
@@ -287,7 +283,7 @@ class TestHandleWarnCommand:
             await handle_warn_command(mock_update, mock_context)
 
         mock_context.bot.send_message.assert_not_called()
-        mock_update.message.reply_text.assert_not_called()
+        mock_update.message.answer.assert_not_called()
         mock_update.message.delete.assert_not_called()
 
     async def test_send_message_failure_does_not_break(
@@ -309,11 +305,14 @@ class TestHandleWarnCommand:
         self, mock_update, mock_context, mock_registry
     ):
         """Warning still sent even if message deletion fails."""
-        from telegram.error import TelegramError
+        from aiogram.exceptions import TelegramAPIError
+
         target = _make_target_user()
         mock_update.message.reply_to_message = _make_reply_message(target)
         mock_context.args = []
-        mock_update.message.delete.side_effect = TelegramError("no permission")
+        mock_update.message.delete.side_effect = TelegramAPIError(
+            method=MagicMock(), message="no permission"
+        )
 
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
@@ -525,8 +524,8 @@ class TestHandleWarnCommand:
         with patch("bot.handlers.warn.get_group_config_for_update", return_value=mock_registry.get(-1001234567890)):
             await handle_warn_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "Penggunaan" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.answer.assert_called_once()
+        assert "Penggunaan" in mock_update.message.answer.call_args.args[0]
         mock_context.bot.send_message.assert_not_called()
 
     async def test_username_mode_with_reason(

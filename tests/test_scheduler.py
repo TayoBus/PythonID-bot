@@ -8,9 +8,10 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram.constants import ChatMemberStatus
+from aiogram.enums import ChatMemberStatus
 
 from bot.database.models import UserWarning
+from bot.dispatch import AppState
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.services.scheduler import auto_restrict_expired_warnings
 
@@ -67,8 +68,8 @@ class TestAutoRestrictExpiredWarnings:
         mock_bot.get_chat_member = AsyncMock(return_value=mock_member)
 
         # Mock context (JobQueue context)
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=mock_registry):
@@ -77,7 +78,7 @@ class TestAutoRestrictExpiredWarnings:
                     new_callable=AsyncMock,
                     return_value="test_bot",
                 ):
-                    await auto_restrict_expired_warnings(mock_context)
+                    await auto_restrict_expired_warnings(state)
 
         # Verify restriction was applied
         mock_bot.restrict_chat_member.assert_called_once()
@@ -102,8 +103,8 @@ class TestAutoRestrictExpiredWarnings:
         mock_db.get_warnings_past_time_threshold_for_group.return_value = []
 
         mock_bot = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=mock_registry):
@@ -112,7 +113,7 @@ class TestAutoRestrictExpiredWarnings:
                     new_callable=AsyncMock,
                     return_value="test_bot",
                 ):
-                    await auto_restrict_expired_warnings(mock_context)
+                    await auto_restrict_expired_warnings(state)
 
         # Should not call restrict or send message
         mock_bot.restrict_chat_member.assert_not_called()
@@ -168,8 +169,8 @@ class TestAutoRestrictExpiredWarnings:
         mock_member.user = mock_user
         mock_bot.get_chat_member = AsyncMock(return_value=mock_member)
 
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=mock_registry):
@@ -178,7 +179,7 @@ class TestAutoRestrictExpiredWarnings:
                     new_callable=AsyncMock,
                     return_value="test_bot",
                 ):
-                    await auto_restrict_expired_warnings(mock_context)
+                    await auto_restrict_expired_warnings(state)
 
         # Verify both users were restricted
         assert mock_bot.restrict_chat_member.call_count == 2
@@ -215,8 +216,8 @@ class TestAutoRestrictExpiredWarnings:
         mock_member.user = mock_user
         mock_bot.get_chat_member = AsyncMock(return_value=mock_member)
 
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=mock_registry):
@@ -226,7 +227,7 @@ class TestAutoRestrictExpiredWarnings:
                     return_value="test_bot",
                 ):
                     # Should not raise, but log the error
-                    await auto_restrict_expired_warnings(mock_context)
+                    await auto_restrict_expired_warnings(state)
 
         # Verify restriction was attempted
         mock_bot.restrict_chat_member.assert_called_once()
@@ -248,8 +249,8 @@ class TestAutoRestrictExpiredWarnings:
         mock_db.get_warnings_past_time_threshold_for_group.return_value = []
 
         mock_bot = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=custom_registry):
@@ -258,7 +259,7 @@ class TestAutoRestrictExpiredWarnings:
                     new_callable=AsyncMock,
                     return_value="test_bot",
                 ):
-                    await auto_restrict_expired_warnings(mock_context)
+                    await auto_restrict_expired_warnings(state)
 
         # Verify correct group_id and threshold were passed to database query
         mock_db.get_warnings_past_time_threshold_for_group.assert_called_once_with(
@@ -288,8 +289,8 @@ class TestAutoRestrictExpiredWarnings:
         mock_bot.restrict_chat_member = AsyncMock()
         mock_bot.send_message = AsyncMock()
 
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=mock_registry):
@@ -301,9 +302,9 @@ class TestAutoRestrictExpiredWarnings:
                     with patch(
                         "bot.services.scheduler.get_user_status",
                         new_callable=AsyncMock,
-                        return_value=ChatMemberStatus.BANNED,
+                        return_value=ChatMemberStatus.KICKED,
                     ):
-                        await auto_restrict_expired_warnings(mock_context)
+                        await auto_restrict_expired_warnings(state)
 
         # Verify warning was deleted (not just marked unrestricted)
         mock_db.delete_user_warnings.assert_called_once_with(123, -100999)
@@ -346,8 +347,8 @@ class TestAutoRestrictExpiredWarnings:
         mock_bot.restrict_chat_member = AsyncMock()
         mock_bot.send_message = AsyncMock()
 
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=mock_registry):
@@ -359,12 +360,12 @@ class TestAutoRestrictExpiredWarnings:
                     with patch(
                         "bot.services.scheduler.get_user_status",
                         new_callable=AsyncMock,
-                        return_value=ChatMemberStatus.BANNED,
+                        return_value=ChatMemberStatus.KICKED,
                     ):
                         # First run - should process and delete warning
-                        await auto_restrict_expired_warnings(mock_context)
+                        await auto_restrict_expired_warnings(state)
                         # Second run - should find no warnings
-                        await auto_restrict_expired_warnings(mock_context)
+                        await auto_restrict_expired_warnings(state)
 
         # Verify delete was called exactly once (first run only)
         mock_db.delete_user_warnings.assert_called_once_with(123, -100999)
@@ -396,8 +397,8 @@ class TestAutoRestrictExpiredWarnings:
         # Make get_chat_member raise an exception
         mock_bot.get_chat_member = AsyncMock(side_effect=Exception("User not found"))
 
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=mock_registry):
@@ -411,7 +412,7 @@ class TestAutoRestrictExpiredWarnings:
                         new_callable=AsyncMock,
                         return_value="test_bot",
                     ):
-                        await auto_restrict_expired_warnings(mock_context)
+                        await auto_restrict_expired_warnings(state)
 
         # Verify restriction was applied
         mock_bot.restrict_chat_member.assert_called_once()
@@ -448,8 +449,8 @@ class TestAutoRestrictExpiredWarnings:
         ]
 
         mock_bot = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
+        state = AppState()
+        state.bot = mock_bot
 
         with patch("bot.services.scheduler.get_database", return_value=mock_db):
             with patch("bot.services.scheduler.get_group_registry", return_value=registry):
@@ -458,7 +459,7 @@ class TestAutoRestrictExpiredWarnings:
                     new_callable=AsyncMock,
                     return_value="test_bot",
                 ):
-                    await auto_restrict_expired_warnings(mock_context)
+                    await auto_restrict_expired_warnings(state)
 
         # Both groups should have been queried despite first failure
         assert mock_db.get_warnings_past_time_threshold_for_group.call_count == 2

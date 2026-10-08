@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot.database.service import init_database, reset_database
+from bot.dispatch import AppState, HandlerContext
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.handlers.dm import handle_dm
 from bot.services.user_checker import ProfileCheckResult
@@ -35,18 +36,21 @@ def mock_update():
     update.message.from_user.username = "testuser"
     update.message.from_user.full_name = "Test User"
     update.message.text = ""
-    update.message.reply_text = AsyncMock()
-    update.effective_chat = MagicMock()
-    update.effective_chat.type = "private"
+    update.message.reply = AsyncMock()
+    update.message.answer = AsyncMock()
+    update.message.chat = MagicMock()
+    update.message.chat.type = "private"
     return update
 
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = AsyncMock()
-    context.bot.id = 99999
-    return context
+    bot = MagicMock()
+    bot.id = 99999
+    bot.send_message = AsyncMock()
+    bot.restrict_chat_member = AsyncMock()
+    state = AppState()
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 @pytest.fixture
@@ -77,11 +81,11 @@ class TestHandleDM:
         mock_context.bot.restrict_chat_member.assert_not_called()
 
     async def test_non_private_chat_ignored(self, mock_update, mock_context):
-        mock_update.effective_chat.type = "group"
+        mock_update.message.chat.type = "group"
 
         await handle_dm(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_not_called()
+        mock_update.message.reply.assert_not_called()
 
     async def test_user_not_in_group(
         self, mock_update, mock_context, mock_registry, temp_db
@@ -96,8 +100,8 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "belum bergabung di grup" in call_args.args[0]
         mock_context.bot.restrict_chat_member.assert_not_called()
 
@@ -115,8 +119,8 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "belum bergabung di grup" in call_args.args[0]
 
     async def test_user_left_group(
@@ -132,8 +136,8 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "belum bergabung di grup" in call_args.args[0]
 
     async def test_user_kicked_from_group(
@@ -149,8 +153,8 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "belum bergabung di grup" in call_args.args[0]
 
     async def test_missing_profile_sends_requirements(
@@ -174,8 +178,8 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "❌" in call_args.args[0]
         assert "foto profil publik" in call_args.args[0]
         mock_context.bot.restrict_chat_member.assert_not_called()
@@ -201,7 +205,7 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        call_args = mock_update.message.reply_text.call_args
+        call_args = mock_update.message.reply.call_args
         assert "username" in call_args.args[0]
 
     async def test_complete_profile_not_restricted_by_bot(
@@ -225,8 +229,8 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "tidak memiliki pembatasan dari bot" in call_args.args[0]
         mock_context.bot.restrict_chat_member.assert_not_called()
 
@@ -263,7 +267,7 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        reply_args = mock_update.message.reply_text.call_args
+        reply_args = mock_update.message.reply.call_args
         assert "✅" in reply_args.args[0]
         assert "dicabut" in reply_args.args[0]
 
@@ -299,7 +303,7 @@ class TestHandleDM:
             await handle_dm(mock_update, mock_context)
 
         mock_context.bot.restrict_chat_member.assert_not_called()
-        call_args = mock_update.message.reply_text.call_args
+        call_args = mock_update.message.reply.call_args
         assert "sudah tidak dibatasi" in call_args.args[0]
         assert db.is_user_restricted_by_bot(12345, -1001234567890) is False
 
@@ -330,7 +334,7 @@ class TestHandleDM:
             await handle_dm(mock_update, mock_context)
 
         mock_context.bot.restrict_chat_member.assert_not_called()
-        call_args = mock_update.message.reply_text.call_args
+        call_args = mock_update.message.reply.call_args
         assert "tidak memiliki pembatasan dari bot" in call_args.args[0]
 
     async def test_guest_bot_restriction_not_unrestricted_via_dm(
@@ -362,7 +366,7 @@ class TestHandleDM:
             await handle_dm(mock_update, mock_context)
 
         mock_context.bot.restrict_chat_member.assert_not_called()
-        call_args = mock_update.message.reply_text.call_args
+        call_args = mock_update.message.reply.call_args
         assert "tidak memiliki pembatasan dari bot" in call_args.args[0]
 
     async def test_both_profile_and_guest_restriction_unrestricted_via_dm(
@@ -399,7 +403,7 @@ class TestHandleDM:
         ):
             await handle_dm(mock_update, mock_context)
 
-        reply_args = mock_update.message.reply_text.call_args
+        reply_args = mock_update.message.reply.call_args
         assert "✅" in reply_args.args[0]
         assert db.is_user_restricted_by_bot(12345, -1001234567890, warning_kind="profile") is False
         assert db.is_user_restricted_by_bot(12345, -1001234567890, warning_kind="guest_bot") is False
@@ -435,7 +439,7 @@ class TestHandleDM:
         mock_context.bot.restrict_chat_member.assert_not_called()
 
         # Should tell user to check group and verify
-        reply_args = mock_update.message.reply_text.call_args
+        reply_args = mock_update.message.reply.call_args
         assert "⏳" in reply_args.args[0]
         assert "verifikasi captcha yang tertunda" in reply_args.args[0]
         assert "tekan tombol verifikasi" in reply_args.args[0]
@@ -475,7 +479,7 @@ class TestHandleDM:
         mock_check_profile.assert_not_called()
 
         # Should redirect to group
-        reply_args = mock_update.message.reply_text.call_args
+        reply_args = mock_update.message.reply.call_args
         assert "⏳" in reply_args.args[0]
         assert "verifikasi captcha yang tertunda" in reply_args.args[0]
 
@@ -538,7 +542,7 @@ class TestUnrestrictUserError:
             ),
         ):
             await handle_dm(mock_update, mock_context)
-            mock_update.message.reply_text.assert_called_with(
+            mock_update.message.reply.assert_called_with(
                 "❌ Gagal membuka pembatasan. Silakan hubungi admin grup."
             )
 

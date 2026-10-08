@@ -2,10 +2,11 @@
 
 import json
 import tempfile
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from aiogram.types import Chat, Message, Update, User
 from pydantic import ValidationError
 
 from bot.group_config import (
@@ -18,6 +19,18 @@ from bot.group_config import (
     load_groups_from_json,
     reset_group_registry,
 )
+
+
+def _make_update(chat_id=-100):
+    """Build a real aiogram Update carrying a message in the given chat."""
+    chat = Chat(id=chat_id, type="supergroup", title="Test Group")
+    msg = Message(
+        message_id=1,
+        date=datetime.now(),
+        chat=chat,
+        from_user=User(id=1, is_bot=False, first_name="Tester"),
+    )
+    return Update(update_id=1, message=msg)
 
 
 class TestGroupConfig:
@@ -451,9 +464,7 @@ class TestGetGroupConfigForUpdate:
     def test_returns_none_when_registry_not_initialized(self):
         reset_group_registry()
 
-        update = MagicMock()
-        update.effective_chat = MagicMock()
-        update.effective_chat.id = -100
+        update = _make_update(chat_id=-100)
 
         result = get_group_config_for_update(update)
         assert result is None
@@ -463,9 +474,7 @@ class TestGetGroupConfigForUpdate:
         registry = GroupRegistry()
         registry.register(gc)
 
-        update = MagicMock()
-        update.effective_chat = MagicMock()
-        update.effective_chat.id = -100
+        update = _make_update(chat_id=-100)
 
         with patch("bot.group_config.get_group_registry", return_value=registry):
             result = get_group_config_for_update(update)
@@ -475,9 +484,7 @@ class TestGetGroupConfigForUpdate:
     def test_returns_none_for_unmonitored_group(self):
         registry = GroupRegistry()
 
-        update = MagicMock()
-        update.effective_chat = MagicMock()
-        update.effective_chat.id = -999
+        update = _make_update(chat_id=-999)
 
         with patch("bot.group_config.get_group_registry", return_value=registry):
             result = get_group_config_for_update(update)
@@ -485,8 +492,7 @@ class TestGetGroupConfigForUpdate:
         assert result is None
 
     def test_returns_none_when_no_effective_chat(self):
-        update = MagicMock()
-        update.effective_chat = None
+        update = Update(update_id=1)
 
         result = get_group_config_for_update(update)
         assert result is None

@@ -3,8 +3,9 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram.error import TimedOut
+from aiogram.exceptions import TelegramNetworkError
 
+from bot.dispatch import AppState, HandlerContext
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.handlers.check import (
     _parse_warn_callback_data,
@@ -48,9 +49,10 @@ def mock_update():
     update.message.from_user = MagicMock()
     update.message.from_user.id = 12345
     update.message.from_user.full_name = "Admin User"
-    update.message.reply_text = AsyncMock()
-    update.effective_chat = MagicMock()
-    update.effective_chat.type = "private"
+    update.message.reply = AsyncMock()
+    update.message.answer = AsyncMock()
+    update.message.chat = MagicMock()
+    update.message.chat.type = "private"
     update.message.forward_origin = None
     update.message.forward_from = None
     return update
@@ -58,39 +60,38 @@ def mock_update():
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = MagicMock()
-    context.bot.get_chat = AsyncMock()
-    context.bot.get_user_profile_photos = AsyncMock()
-    context.bot.send_message = AsyncMock()
+    bot = MagicMock()
+    bot.get_chat = AsyncMock()
+    bot.get_user_profile_photos = AsyncMock()
+    bot.send_message = AsyncMock()
 
     mock_chat = MagicMock()
     mock_chat.full_name = "Test User"
     mock_chat.username = "testuser"
-    context.bot.get_chat.return_value = mock_chat
+    bot.get_chat.return_value = mock_chat
 
-    context.bot_data = {
-        "admin_ids": [12345],
-        "group_admin_ids": {-1001234567890: [12345]},
-    }
-    context.args = []
-    return context
+    state = AppState()
+    state.admin_ids = [12345]
+    state.group_admin_ids = {-1001234567890: [12345]}
+    return HandlerContext(bot=bot, state=state, args=[])
+
+
+def _network_error():
+    return TelegramNetworkError(method=MagicMock(), message="timeout")
 
 
 class TestHandleCheckCommand:
     async def test_check_command_non_admin(self, mock_update, mock_context):
         """Non-admin cannot use /check."""
         mock_update.message.from_user.id = 99999
-        mock_context.bot_data = {
-            "admin_ids": [12345],
-            "group_admin_ids": {-1001234567890: []},
-        }
+        mock_context.state.admin_ids = [12345]
+        mock_context.state.group_admin_ids = {-1001234567890: []}
         mock_context.args = ["123456"]
 
         await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "izin" in call_args.args[0]
 
     async def test_check_command_missing_user_id(self, mock_update, mock_context):
@@ -99,8 +100,8 @@ class TestHandleCheckCommand:
 
         await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "/check USER_ID" in call_args.args[0]
 
     async def test_check_command_invalid_user_id(self, mock_update, mock_context):
@@ -109,8 +110,8 @@ class TestHandleCheckCommand:
 
         await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "angka" in call_args.args[0]
 
     async def test_check_command_complete_profile(self, mock_update, mock_context):
@@ -134,8 +135,8 @@ class TestHandleCheckCommand:
         ):
             await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "555666" in call_args.args[0]
         assert "\u2705" in call_args.args[0]
         keyboard = call_args.kwargs.get("reply_markup")
@@ -165,7 +166,7 @@ class TestHandleCheckCommand:
         ):
             await handle_check_command(mock_update, mock_context)
 
-        keyboard = mock_update.message.reply_text.call_args.kwargs.get("reply_markup")
+        keyboard = mock_update.message.reply.call_args.kwargs.get("reply_markup")
         assert keyboard is not None
         buttons = keyboard.inline_keyboard[0]
         callback_data = [btn.callback_data for btn in buttons]
@@ -193,8 +194,8 @@ class TestHandleCheckCommand:
         ):
             await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "555666" in call_args.args[0]
         assert "\u2705" in call_args.args[0]
         keyboard = call_args.kwargs.get("reply_markup")
@@ -211,7 +212,7 @@ class TestHandleCheckCommand:
     ):
         """Admins of multiple groups choose the group before acting."""
         mock_context.args = ["555666"]
-        mock_context.bot_data["group_admin_ids"] = {
+        mock_context.state.group_admin_ids = {
             -1001234567890: [12345],
             -1009876543210: [12345],
         }
@@ -226,7 +227,7 @@ class TestHandleCheckCommand:
         ):
             await handle_check_command(mock_update, mock_context)
 
-        keyboard = mock_update.message.reply_text.call_args.kwargs["reply_markup"]
+        keyboard = mock_update.message.reply.call_args.kwargs["reply_markup"]
         callback_data = [row[0].callback_data for row in keyboard.inline_keyboard]
         assert callback_data == [
             "checkgrp:-1001234567890:555666",
@@ -254,8 +255,8 @@ class TestHandleCheckCommand:
         ):
             await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "555666" in call_args.args[0]
         assert "\u274c" in call_args.args[0]
         keyboard = call_args.kwargs.get("reply_markup")
@@ -285,7 +286,7 @@ class TestHandleCheckCommand:
         ):
             await handle_check_command(mock_update, mock_context)
 
-        keyboard = mock_update.message.reply_text.call_args.kwargs.get("reply_markup")
+        keyboard = mock_update.message.reply.call_args.kwargs.get("reply_markup")
         assert keyboard is not None
         buttons = [button for row in keyboard.inline_keyboard for button in row]
         callback_data = [btn.callback_data for btn in buttons]
@@ -311,7 +312,7 @@ class TestHandleCheckCommand:
         ):
             await handle_check_command(mock_update, mock_context)
 
-        keyboard = mock_update.message.reply_text.call_args.kwargs.get("reply_markup")
+        keyboard = mock_update.message.reply.call_args.kwargs.get("reply_markup")
         assert keyboard is not None
         buttons = keyboard.inline_keyboard[0]
         callback_data = [btn.callback_data for btn in buttons]
@@ -321,13 +322,13 @@ class TestHandleCheckCommand:
 
     async def test_check_command_only_private(self, mock_update, mock_context):
         """Command only works in private chat."""
-        mock_update.effective_chat.type = "group"
+        mock_update.message.chat.type = "group"
         mock_context.args = ["123456"]
 
         await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "chat pribadi" in call_args.args[0]
 
     async def test_check_command_no_message(self, mock_context):
@@ -352,19 +353,19 @@ class TestHandleCheckCommand:
 
         await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "Gagal memeriksa" in call_args.args[0]
 
     async def test_check_command_timeout(self, mock_update, mock_context):
-        """Handles TimedOut error gracefully."""
+        """Handles TelegramNetworkError (PTB TimedOut) gracefully."""
         mock_context.args = ["555666"]
-        mock_context.bot.get_chat.side_effect = TimedOut()
+        mock_context.bot.get_chat.side_effect = _network_error()
 
         await handle_check_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "timeout" in call_args.args[0].lower()
 
 
@@ -372,10 +373,8 @@ class TestHandleCheckForwardedMessage:
     async def test_check_forwarded_non_admin(self, mock_update, mock_context):
         """Forwarded checks show no available groups for a non-admin."""
         mock_update.message.from_user.id = 99999
-        mock_context.bot_data = {
-            "admin_ids": [12345],
-            "group_admin_ids": {-1001234567890: []},
-        }
+        mock_context.state.admin_ids = [12345]
+        mock_context.state.group_admin_ids = {-1001234567890: []}
 
         forwarded_user = MagicMock()
         forwarded_user.id = 555666
@@ -393,8 +392,8 @@ class TestHandleCheckForwardedMessage:
         ):
             await handle_check_forwarded_message(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "admin" in call_args.args[0]
 
     async def test_check_forwarded_hidden_user(self, mock_update, mock_context):
@@ -404,8 +403,8 @@ class TestHandleCheckForwardedMessage:
 
         await handle_check_forwarded_message(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "Tidak dapat mengekstrak" in call_args.args[0]
 
     async def test_check_forwarded_success(self, mock_update, mock_context):
@@ -431,8 +430,8 @@ class TestHandleCheckForwardedMessage:
         ):
             await handle_check_forwarded_message(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "555666" in call_args.args[0]
 
     async def test_check_forwarded_with_forward_origin(
@@ -464,7 +463,7 @@ class TestHandleCheckForwardedMessage:
         ):
             await handle_check_forwarded_message(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
+        mock_update.message.reply.assert_called_once()
 
     async def test_check_forwarded_no_message(self, mock_context):
         """Returns early if no message."""
@@ -492,23 +491,23 @@ class TestHandleCheckForwardedMessage:
 
         await handle_check_forwarded_message(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "Gagal memeriksa" in call_args.args[0]
 
     async def test_check_forwarded_timeout(self, mock_update, mock_context):
-        """Handles TimedOut error gracefully."""
+        """Handles TelegramNetworkError (PTB TimedOut) gracefully."""
         forwarded_user = MagicMock()
         forwarded_user.id = 555666
         forwarded_user.full_name = "Forwarded User"
         mock_update.message.forward_from = forwarded_user
 
-        mock_context.bot.get_chat.side_effect = TimedOut()
+        mock_context.bot.get_chat.side_effect = _network_error()
 
         await handle_check_forwarded_message(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "timeout" in call_args.args[0].lower()
 
 
@@ -521,7 +520,8 @@ class TestHandleCheckGroupCallback:
         query.from_user.id = 12345
         query.data = "checkgrp:-1001234567890:555666"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
         result = ProfileCheckResult(has_profile_photo=False, has_username=True)
         mock_db = MagicMock()
@@ -535,7 +535,7 @@ class TestHandleCheckGroupCallback:
             await handle_check_group_callback(update, mock_context)
 
         query.answer.assert_awaited_once()
-        keyboard = query.edit_message_text.call_args.kwargs["reply_markup"]
+        keyboard = query.message.edit_text.call_args.kwargs["reply_markup"]
         callback_data = [
             button.callback_data
             for row in keyboard.inline_keyboard
@@ -552,13 +552,14 @@ class TestHandleCheckGroupCallback:
         query.from_user.id = 99999
         query.data = "checkgrp:-1001234567890:555666"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         await handle_check_group_callback(update, mock_context)
 
-        query.edit_message_text.assert_awaited_once()
-        assert "bukan admin" in query.edit_message_text.call_args.args[0]
+        query.message.edit_text.assert_awaited_once()
+        assert "bukan admin" in query.message.edit_text.call_args.args[0]
         mock_context.bot.get_chat.assert_not_awaited()
 
     async def test_group_callback_rejects_invalid_data(self, mock_context):
@@ -568,12 +569,13 @@ class TestHandleCheckGroupCallback:
         query.from_user.id = 12345
         query.data = "checkgrp:invalid"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         await handle_check_group_callback(update, mock_context)
 
-        assert "tidak valid" in query.edit_message_text.call_args.args[0]
+        assert "tidak valid" in query.message.edit_text.call_args.args[0]
 
 
 class TestHandleWarnCallback:
@@ -595,18 +597,17 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Non Admin"
         query.data = "warn:-1001234567890:555666:pu"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
-        mock_context.bot_data = {
-            "group_admin_ids": {-1001234567890: []},
-        }
+        mock_context.state.group_admin_ids = {-1001234567890: []}
 
         await handle_warn_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "bukan admin" in call_args.args[0]
 
     async def test_warn_callback_success(
@@ -620,7 +621,8 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Admin User"
         query.data = "warn:-1001234567890:555666:pu"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         mock_chat = MagicMock()
@@ -647,8 +649,8 @@ class TestHandleWarnCallback:
         assert "foto profil publik" in send_call_args.kwargs["text"]
         assert "username" in send_call_args.kwargs["text"]
 
-        query.edit_message_text.assert_called_once()
-        edit_call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        edit_call_args = query.message.edit_text.call_args
         assert "dikirim" in edit_call_args.args[0]
 
     async def test_warn_callback_success_missing_photo_only(
@@ -662,7 +664,8 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Admin User"
         query.data = "warn:-1001234567890:555666:p"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         mock_chat = MagicMock()
@@ -691,14 +694,15 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Admin User"
         query.data = "warn:invalid"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         await handle_warn_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "tidak valid" in call_args.args[0]
 
     async def test_warn_callback_no_query(self, mock_context):
@@ -736,7 +740,8 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Admin User"
         query.data = "warn:-1001234567890:555666:pu"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         mock_chat = MagicMock()
@@ -752,14 +757,14 @@ class TestHandleWarnCallback:
         ):
             await handle_warn_callback(update, mock_context)
 
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "Gagal mengirim" in call_args.args[0]
 
     async def test_warn_callback_timeout(
         self, mock_context, mock_settings, mock_registry
     ):
-        """Handles TimedOut error gracefully (per-group failure)."""
+        """Handles TelegramNetworkError (PTB TimedOut) gracefully (per-group failure)."""
         update = MagicMock()
         query = MagicMock()
         query.from_user = MagicMock()
@@ -767,13 +772,14 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Admin User"
         query.data = "warn:-1001234567890:555666:pu"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         mock_chat = MagicMock()
         mock_chat.full_name = "Test User"
         mock_context.bot.get_chat.return_value = mock_chat
-        mock_context.bot.send_message.side_effect = TimedOut()
+        mock_context.bot.send_message.side_effect = _network_error()
 
         with (
             patch(
@@ -783,14 +789,14 @@ class TestHandleWarnCallback:
         ):
             await handle_warn_callback(update, mock_context)
 
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "Gagal mengirim" in call_args.args[0]
 
     async def test_warn_callback_get_chat_timeout(
         self, mock_context, mock_settings, mock_registry
     ):
-        """Handles TimedOut on get_chat (before the per-group loop)."""
+        """Handles TelegramNetworkError (PTB TimedOut) on get_chat (before the per-group loop)."""
         update = MagicMock()
         query = MagicMock()
         query.from_user = MagicMock()
@@ -798,10 +804,11 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Admin User"
         query.data = "warn:-1001234567890:555666:pu"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
-        mock_context.bot.get_chat.side_effect = TimedOut()
+        mock_context.bot.get_chat.side_effect = _network_error()
 
         with (
             patch(
@@ -811,8 +818,8 @@ class TestHandleWarnCallback:
         ):
             await handle_warn_callback(update, mock_context)
 
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "timeout" in call_args.args[0].lower()
 
     async def test_warn_callback_send_failure(
@@ -826,7 +833,8 @@ class TestHandleWarnCallback:
         query.from_user.full_name = "Admin User"
         query.data = "warn:-1001234567890:555666:pu"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
 
         mock_chat = MagicMock()
@@ -843,6 +851,6 @@ class TestHandleWarnCallback:
         ):
             await handle_warn_callback(update, mock_context)
 
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "Gagal mengirim peringatan" in call_args.args[0]

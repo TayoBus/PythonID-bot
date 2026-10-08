@@ -3,8 +3,10 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
 from bot.database.service import get_database, init_database, reset_database
+from bot.dispatch import AppState, HandlerContext
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.handlers.verify import (
     handle_unrestrict_callback,
@@ -36,19 +38,20 @@ def mock_update():
     update.message.from_user = MagicMock()
     update.message.from_user.id = 12345
     update.message.from_user.full_name = "Admin User"
-    update.message.reply_text = AsyncMock()
-    update.effective_chat = MagicMock()
-    update.effective_chat.type = "private"
+    update.message.reply = AsyncMock()
+    update.message.answer = AsyncMock()
+    update.message.chat = MagicMock()
+    update.message.chat.type = "private"
     return update
 
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = MagicMock()
-    context.bot.get_chat = AsyncMock()
-    context.bot.restrict_chat_member = AsyncMock()
-    context.bot.send_message = AsyncMock()
+    bot = MagicMock()
+    bot.get_chat = AsyncMock()
+    bot.restrict_chat_member = AsyncMock()
+    bot.send_message = AsyncMock()
+    bot.get_chat_member = AsyncMock()
 
     # Mock get_chat to return both chat permissions and user info
     mock_chat = MagicMock()
@@ -63,14 +66,12 @@ def mock_context():
     mock_chat.permissions = mock_permissions
     mock_chat.full_name = "Test User"
     mock_chat.username = "testuser"
-    context.bot.get_chat.return_value = mock_chat
+    bot.get_chat.return_value = mock_chat
 
-    context.bot_data = {
-        "admin_ids": [12345],
-        "group_admin_ids": {GROUP_ID: [12345]},
-    }
-    context.args = []
-    return context
+    state = AppState()
+    state.admin_ids = [12345]
+    state.group_admin_ids = {GROUP_ID: [12345]}
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 class TestHandleVerifyCommand:
@@ -80,7 +81,7 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(update, mock_context)
 
-        mock_context.bot_data["admin_ids"]  # Just verify no crash
+        mock_context.state.admin_ids  # Just verify no crash
 
     async def test_no_from_user(self, mock_context):
         update = MagicMock()
@@ -89,27 +90,27 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(update, mock_context)
 
-        # Should return early without calling reply_text
+        # Should return early without calling reply
 
     async def test_non_private_chat_rejected(self, mock_update, mock_context):
-        mock_update.effective_chat.type = "group"
+        mock_update.message.chat.type = "group"
         mock_context.args = ["123456"]
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "chat pribadi" in call_args.args[0]
 
     async def test_non_admin_rejected(self, mock_update, mock_context):
         mock_update.message.from_user.id = 99999
-        mock_context.bot_data = {"admin_ids": [12345]}
+        mock_context.state.admin_ids = [12345]
         mock_context.args = ["123456"]
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "izin" in call_args.args[0]
 
     async def test_no_user_id_provided(self, mock_update, mock_context):
@@ -117,8 +118,8 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "/verify USER_ID" in call_args.args[0]
 
     async def test_invalid_user_id_format(self, mock_update, mock_context):
@@ -126,8 +127,8 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "angka" in call_args.args[0]
 
     async def test_successful_verify_new_user(self, mock_update, mock_context, temp_db, monkeypatch):
@@ -141,8 +142,8 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         response_text = call_args.args[0]
         assert "diverifikasi" in response_text
         assert "whitelist foto profil" in response_text
@@ -169,8 +170,8 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "diverifikasi" in call_args.args[0]
 
     async def test_verify_multiple_users(self, mock_update, mock_context, temp_db, monkeypatch):
@@ -196,14 +197,14 @@ class TestHandleVerifyCommand:
         assert db.is_user_photo_whitelisted(222222)
 
     async def test_verify_respects_admin_ids(self, mock_update, mock_context):
-        mock_context.bot_data = {"admin_ids": [999, 888]}
+        mock_context.state.admin_ids = [999, 888]
         mock_update.message.from_user.id = 555  # Not an admin
         mock_context.args = ["123456"]
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "izin" in call_args.args[0]
 
     async def test_verify_with_extra_args_uses_first(self, mock_update, mock_context, temp_db, monkeypatch):
@@ -217,8 +218,8 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "diverifikasi" in call_args.args[0]
 
         db = get_database()
@@ -243,7 +244,7 @@ class TestHandleVerifyCommand:
     ):
         target_user_id = 33333333
         mock_context.args = [str(target_user_id)]
-        mock_context.bot_data["group_admin_ids"] = {
+        mock_context.state.group_admin_ids = {
             GROUP_ID: [12345],
             -1009876543210: [12345],
         }
@@ -251,7 +252,7 @@ class TestHandleVerifyCommand:
         await handle_verify_command(mock_update, mock_context)
 
         assert get_database().is_user_photo_whitelisted(target_user_id)
-        assert "/check" in mock_update.message.reply_text.call_args.args[0]
+        assert "/check" in mock_update.message.reply.call_args.args[0]
         mock_context.bot.restrict_chat_member.assert_not_called()
         mock_context.bot.send_message.assert_not_called()
 
@@ -265,15 +266,15 @@ class TestHandleVerifyCommand:
             user_id=target_user_id, verified_by_admin_id=12345
         )
         mock_context.args = [str(target_user_id)]
-        mock_context.bot_data["group_admin_ids"] = {
+        mock_context.state.group_admin_ids = {
             GROUP_ID: [12345],
             -1009876543210: [12345],
         }
 
         await handle_verify_command(mock_update, mock_context)
 
-        assert mock_update.message.reply_text.call_count == 1
-        text = mock_update.message.reply_text.call_args.args[0]
+        assert mock_update.message.reply.call_count == 1
+        text = mock_update.message.reply.call_args.args[0]
         assert "sudah ada di whitelist" in text
         assert "kesalahan" not in text
 
@@ -289,7 +290,7 @@ class TestHandleVerifyCommand:
 
         await handle_verify_command(mock_update, mock_context)
 
-        text = mock_update.message.reply_text.call_args.args[0]
+        text = mock_update.message.reply.call_args.args[0]
         assert "sudah ada di whitelist" not in text
         assert "kesalahan" in text
 
@@ -357,8 +358,6 @@ class TestHandleVerifyCommand:
         self, mock_update, mock_context, temp_db, monkeypatch
     ):
         """Test that verify doesn't fail if user is not restricted."""
-        from telegram.error import BadRequest
-
         gc = GroupConfig(group_id=-1001234567890, warning_topic_id=12345)
         registry = GroupRegistry()
         registry.register(gc)
@@ -367,8 +366,10 @@ class TestHandleVerifyCommand:
         target_user_id = 44444444  # Use unique ID
         mock_context.args = [str(target_user_id)]
 
-        # Simulate BadRequest when trying to unrestrict a non-restricted user
-        mock_context.bot.restrict_chat_member.side_effect = BadRequest("User not restricted")
+        # Simulate TelegramBadRequest (PTB BadRequest) when trying to unrestrict a non-restricted user
+        mock_context.bot.restrict_chat_member.side_effect = TelegramBadRequest(
+            method=MagicMock(), message="User not restricted"
+        )
 
         # Should not raise exception
         await handle_verify_command(mock_update, mock_context)
@@ -378,8 +379,8 @@ class TestHandleVerifyCommand:
         assert db.is_user_photo_whitelisted(target_user_id)
 
         # Should still send success message
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "diverifikasi" in call_args.args[0]
 
     async def test_verify_with_warnings_sends_notification_to_topic(
@@ -454,8 +455,8 @@ class TestHandleVerifyCommand:
         await handle_verify_command(mock_update, mock_context)
 
         # Should still return success message despite per-group failure
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "diverifikasi" in call_args.args[0]
 
         # User should still be whitelisted
@@ -481,24 +482,24 @@ class TestHandleUnverifyCommand:
         # Should return early without crash
 
     async def test_non_private_chat_rejected(self, mock_update, mock_context):
-        mock_update.effective_chat.type = "group"
+        mock_update.message.chat.type = "group"
         mock_context.args = ["123456"]
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "chat pribadi" in call_args.args[0]
 
     async def test_non_admin_rejected(self, mock_update, mock_context):
         mock_update.message.from_user.id = 99999
-        mock_context.bot_data = {"admin_ids": [12345]}
+        mock_context.state.admin_ids = [12345]
         mock_context.args = ["123456"]
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "izin" in call_args.args[0]
 
     async def test_no_user_id_provided(self, mock_update, mock_context):
@@ -506,8 +507,8 @@ class TestHandleUnverifyCommand:
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "/unverify USER_ID" in call_args.args[0]
 
     async def test_invalid_user_id_format(self, mock_update, mock_context):
@@ -515,8 +516,8 @@ class TestHandleUnverifyCommand:
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "angka" in call_args.args[0]
 
     async def test_successful_unverify_whitelisted_user(
@@ -532,8 +533,8 @@ class TestHandleUnverifyCommand:
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "dihapus dari whitelist" in call_args.args[0]
 
         assert not db.is_user_photo_whitelisted(target_user_id)
@@ -544,8 +545,8 @@ class TestHandleUnverifyCommand:
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "tidak ada di whitelist" in call_args.args[0]
 
     async def test_unverify_unexpected_error_reports_generic_failure(
@@ -560,8 +561,8 @@ class TestHandleUnverifyCommand:
 
         await handle_unverify_command(mock_update, mock_context)
 
-        assert mock_update.message.reply_text.call_count == 1
-        assert "kesalahan" in mock_update.message.reply_text.call_args.args[0]
+        assert mock_update.message.reply.call_count == 1
+        assert "kesalahan" in mock_update.message.reply.call_args.args[0]
 
     async def test_unverify_multiple_users(self, mock_update, mock_context, temp_db):
         db = get_database()
@@ -587,14 +588,14 @@ class TestHandleUnverifyCommand:
         db = get_database()
         db.add_photo_verification_whitelist(user_id=555666, verified_by_admin_id=12345)
 
-        mock_context.bot_data = {"admin_ids": [999, 888]}
+        mock_context.state.admin_ids = [999, 888]
         mock_update.message.from_user.id = 555  # Not an admin
         mock_context.args = ["555666"]
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "izin" in call_args.args[0]
 
         # User should still be whitelisted
@@ -610,14 +611,27 @@ class TestHandleUnverifyCommand:
 
         await handle_unverify_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        call_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        call_args = mock_update.message.reply.call_args
         assert "dihapus dari whitelist" in call_args.args[0]
 
         assert not db.is_user_photo_whitelisted(555666)
 
 
 class TestHandleVerifyCallback:
+    def make_update(self, query_data, admin_id=12345):
+        update = MagicMock()
+        query = MagicMock()
+        query.from_user = MagicMock()
+        query.from_user.id = admin_id
+        query.from_user.full_name = "Admin User"
+        query.data = query_data
+        query.answer = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
+        update.callback_query = query
+        return update, query
+
     async def test_no_query(self, mock_context):
         update = MagicMock()
         update.callback_query = None
@@ -632,41 +646,25 @@ class TestHandleVerifyCallback:
         await handle_verify_callback(update, mock_context)
 
     async def test_non_admin_rejected(self, mock_context):
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 99999
-        query.from_user.full_name = "Non Admin"
-        query.data = f"verify:{GROUP_ID}:555666"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"verify:{GROUP_ID}:555666", admin_id=99999)
 
-        mock_context.bot_data = {"group_admin_ids": {}}
+        mock_context.state.group_admin_ids = {}
 
         await handle_verify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "bukan admin" in call_args.args[0]
 
     async def test_invalid_callback_data_format(self, mock_context):
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = "verify:invalid"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update("verify:invalid")
 
         await handle_verify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "tidak valid" in call_args.args[0]
 
     async def test_successful_verify_callback(self, temp_db, mock_context, monkeypatch):
@@ -675,21 +673,13 @@ class TestHandleVerifyCallback:
         registry.register(gc)
         monkeypatch.setattr("bot.handlers.verify.get_group_registry", lambda: registry)
 
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = f"verify:{gc.group_id}:999888"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"verify:{gc.group_id}:999888")
 
         await handle_verify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "diverifikasi" in call_args.args[0]
 
         # Verify user was added to whitelist
@@ -706,45 +696,42 @@ class TestHandleVerifyCallback:
         db = get_database()
         db.add_photo_verification_whitelist(user_id=555666, verified_by_admin_id=12345)
 
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = f"verify:{gc.group_id}:555666"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"verify:{gc.group_id}:555666")
 
         await handle_verify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "diverifikasi" in call_args.args[0]
 
     async def test_verify_callback_generic_exception(self, temp_db, mock_context):
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = f"verify:{GROUP_ID}:555666"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"verify:{GROUP_ID}:555666")
 
         # Mock get_group_registry to raise a generic exception
         with patch("bot.handlers.verify.get_group_registry", side_effect=RuntimeError("Registry error")):
             await handle_verify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "Terjadi kesalahan" in call_args.args[0]
 
 
 class TestHandleUnverifyCallback:
+    def make_update(self, query_data, admin_id=12345):
+        update = MagicMock()
+        query = MagicMock()
+        query.from_user = MagicMock()
+        query.from_user.id = admin_id
+        query.from_user.full_name = "Admin User"
+        query.data = query_data
+        query.answer = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
+        update.callback_query = query
+        return update, query
+
     async def test_no_query(self, mock_context):
         update = MagicMock()
         update.callback_query = None
@@ -759,103 +746,63 @@ class TestHandleUnverifyCallback:
         await handle_unverify_callback(update, mock_context)
 
     async def test_non_admin_rejected(self, mock_context):
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 99999
-        query.from_user.full_name = "Non Admin"
-        query.data = f"unverify:{GROUP_ID}:555666"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"unverify:{GROUP_ID}:555666", admin_id=99999)
 
-        mock_context.bot_data = {"group_admin_ids": {}}
+        mock_context.state.group_admin_ids = {}
 
         await handle_unverify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "bukan admin" in call_args.args[0]
 
     async def test_invalid_callback_data_format(self, mock_context):
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = "unverify:invalid"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update("unverify:invalid")
 
         await handle_unverify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "tidak valid" in call_args.args[0]
 
     async def test_successful_unverify_callback(self, temp_db, mock_context):
         db = get_database()
         db.add_photo_verification_whitelist(user_id=555666, verified_by_admin_id=12345)
 
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = f"unverify:{GROUP_ID}:555666"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"unverify:{GROUP_ID}:555666")
 
         await handle_unverify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "dihapus dari whitelist" in call_args.args[0]
 
         # Verify user was removed from whitelist
         assert not db.is_user_photo_whitelisted(555666)
 
     async def test_unverify_callback_not_whitelisted(self, temp_db, mock_context):
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = f"unverify:{GROUP_ID}:555666"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"unverify:{GROUP_ID}:555666")
 
         await handle_unverify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "tidak ada di whitelist" in call_args.args[0]
 
     async def test_unverify_callback_generic_exception(self, temp_db, mock_context):
-        update = MagicMock()
-        query = MagicMock()
-        query.from_user = MagicMock()
-        query.from_user.id = 12345
-        query.from_user.full_name = "Admin User"
-        query.data = f"unverify:{GROUP_ID}:555666"
-        query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
-        update.callback_query = query
+        update, query = self.make_update(f"unverify:{GROUP_ID}:555666")
 
         # Mock unverify_user to raise a generic exception
         with patch("bot.handlers.verify.unverify_user", side_effect=RuntimeError("Unverify error")):
             await handle_unverify_callback(update, mock_context)
 
         query.answer.assert_called_once()
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "Terjadi kesalahan" in call_args.args[0]
 
 
@@ -992,8 +939,6 @@ class TestVerifyUserInGroup:
 
     async def test_telegram_unrestrict_failure_preserves_restriction(self, temp_db, mock_context):
         """If Telegram unrestrict fails, restriction records are preserved for retry."""
-        from telegram.error import BadRequest
-
         target_user_id = 555005
         db = get_database()
         gc = GroupConfig(group_id=GROUP_ID, warning_topic_id=12345)
@@ -1003,7 +948,9 @@ class TestVerifyUserInGroup:
         db.get_or_create_user_warning(target_user_id, GROUP_ID)
         db.mark_user_restricted(target_user_id, GROUP_ID)
 
-        mock_context.bot.restrict_chat_member.side_effect = BadRequest("User not found")
+        mock_context.bot.restrict_chat_member.side_effect = TelegramBadRequest(
+            method=MagicMock(), message="User not found"
+        )
 
         message = await verify_user_in_group(
             mock_context.bot, db, registry, target_user_id, 12345, GROUP_ID
@@ -1032,18 +979,19 @@ class TestHandleUnrestrictCallback:
         query.from_user = MagicMock(id=admin_id)
         query.data = f"unrestrict:{GROUP_ID}:888001"
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
+        query.message = MagicMock()
+        query.message.edit_text = AsyncMock()
         update.callback_query = query
         return update, query
 
     async def test_non_group_admin_rejected(self, mock_context):
         update, query = self.make_update(admin_id=99999)
-        mock_context.bot_data["group_admin_ids"] = {}
+        mock_context.state.group_admin_ids = {}
 
         await handle_unrestrict_callback(update, mock_context)
 
         query.answer.assert_awaited_once()
-        assert "bukan admin" in query.edit_message_text.call_args.args[0]
+        assert "bukan admin" in query.message.edit_text.call_args.args[0]
 
     async def test_group_admin_unrestricts_user(self, temp_db, mock_context):
         update, query = self.make_update()
@@ -1054,7 +1002,7 @@ class TestHandleUnrestrictCallback:
         await handle_unrestrict_callback(update, mock_context)
 
         query.answer.assert_awaited_once()
-        assert "Pembatasan bot" in query.edit_message_text.call_args.args[0]
+        assert "Pembatasan bot" in query.message.edit_text.call_args.args[0]
         assert not db.is_user_restricted_by_bot(888001, GROUP_ID)
 
     async def test_invalid_callback_data_rejected(self, mock_context):
@@ -1063,4 +1011,4 @@ class TestHandleUnrestrictCallback:
 
         await handle_unrestrict_callback(update, mock_context)
 
-        assert "tidak valid" in query.edit_message_text.call_args.args[0]
+        assert "tidak valid" in query.message.edit_text.call_args.args[0]

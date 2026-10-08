@@ -1,9 +1,14 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram import Chat, User
-from telegram.error import BadRequest, Forbidden, RetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
+from aiogram.types import Chat, User
 
+from bot.dispatch import AppState, HandlerContext
 from bot.services.telegram_utils import (
     fetch_group_admin_ids,
     get_user_mention,
@@ -16,9 +21,33 @@ from bot.services.telegram_utils import (
 )
 
 
+def _bad_request(message):
+    return TelegramBadRequest(method=MagicMock(), message=message)
+
+
+def _forbidden(message):
+    return TelegramForbiddenError(method=MagicMock(), message=message)
+
+
+def _retry_after(seconds):
+    return TelegramRetryAfter(method=MagicMock(), message="Flood control", retry_after=seconds)
+
+
 @pytest.fixture
 def mock_bot():
     return AsyncMock()
+
+
+def _make_context(group_admin_ids=None, trusted_user_ids=None):
+    """Build a HandlerContext with explicit AppState (aiogram migration).
+
+    group_admin_ids / trusted_user_ids mirror the old bot_data caches; pass
+    trusted_user_ids=None to exercise the lazy DB load path.
+    """
+    state = AppState()
+    state.group_admin_ids = group_admin_ids if group_admin_ids is not None else {}
+    state.trusted_user_ids = trusted_user_ids
+    return HandlerContext(bot=MagicMock(), state=state)
 
 
 class TestGetUserMention:
@@ -307,21 +336,21 @@ class TestUnrestrictUser:
         )
 
     async def test_unrestrict_user_raises_bad_request(self, mock_bot):
-        """Test that BadRequest is raised when user not found."""
-        mock_bot.get_chat.side_effect = BadRequest("User not found")
+        """Test that TelegramBadRequest is raised when user not found."""
+        mock_bot.get_chat.side_effect = _bad_request("User not found")
 
-        with pytest.raises(BadRequest, match="User not found"):
+        with pytest.raises(TelegramBadRequest, match="User not found"):
             await unrestrict_user(mock_bot, group_id=123, user_id=456)
 
     async def test_unrestrict_user_raises_forbidden(self, mock_bot):
-        """Test that Forbidden is raised when bot lacks permissions."""
+        """Test that TelegramForbiddenError is raised when bot lacks permissions."""
         mock_chat = MagicMock()
         mock_permissions = MagicMock()
         mock_chat.permissions = mock_permissions
         mock_bot.get_chat.return_value = mock_chat
-        mock_bot.restrict_chat_member.side_effect = Forbidden("No permissions")
+        mock_bot.restrict_chat_member.side_effect = _forbidden("No permissions")
 
-        with pytest.raises(Forbidden, match="No permissions"):
+        with pytest.raises(TelegramForbiddenError, match="No permissions"):
             await unrestrict_user(mock_bot, group_id=123, user_id=456)
 
 
@@ -388,16 +417,16 @@ class TestGetUserStatus:
         assert result == "creator"
 
     async def test_get_user_status_bad_request(self, mock_bot):
-        """Test handling of BadRequest exception."""
-        mock_bot.get_chat_member.side_effect = BadRequest("User not found")
+        """Test handling of TelegramBadRequest exception."""
+        mock_bot.get_chat_member.side_effect = _bad_request("User not found")
 
         result = await get_user_status(mock_bot, group_id=123, user_id=456)
 
         assert result is None
 
     async def test_get_user_status_forbidden(self, mock_bot):
-        """Test handling of Forbidden exception."""
-        mock_bot.get_chat_member.side_effect = Forbidden("Bot not in group")
+        """Test handling of TelegramForbiddenError exception."""
+        mock_bot.get_chat_member.side_effect = _forbidden("Bot not in group")
 
         result = await get_user_status(mock_bot, group_id=123, user_id=456)
 
@@ -405,7 +434,7 @@ class TestGetUserStatus:
 
     async def test_get_user_status_bot_not_in_group(self, mock_bot):
         """Test when bot is not in the group."""
-        mock_bot.get_chat_member.side_effect = BadRequest("Bot not in group")
+        mock_bot.get_chat_member.side_effect = _bad_request("Bot not in group")
 
         result = await get_user_status(mock_bot, group_id=-1001234567890, user_id=456)
 
@@ -442,30 +471,21 @@ class TestGetUserStatus:
 class TestIsUserAdminOrTrusted:
     @patch("bot.services.telegram_utils.get_database")
     def test_admin_hit_does_not_touch_db(self, mock_get_database):
-        context = MagicMock()
-        context.bot_data = {
-            "group_admin_ids": {-100: [123]},
-            "trusted_user_ids": set(),
-        }
+        context = _make_context(group_admin_ids={-100: [123]}, trusted_user_ids=set())
 
         assert is_user_admin_or_trusted(context, -100, 123) is True
         mock_get_database.assert_not_called()
 
     @patch("bot.services.telegram_utils.get_database")
     def test_trusted_cache_hit_does_not_touch_db(self, mock_get_database):
-        context = MagicMock()
-        context.bot_data = {
-            "group_admin_ids": {-100: []},
-            "trusted_user_ids": {123},
-        }
+        context = _make_context(group_admin_ids={-100: []}, trusted_user_ids={123})
 
         assert is_user_admin_or_trusted(context, -100, 123) is True
         mock_get_database.assert_not_called()
 
     @patch("bot.services.telegram_utils.get_database")
     def test_missing_cache_lazy_loads_from_db_once(self, mock_get_database):
-        context = MagicMock()
-        context.bot_data = {"group_admin_ids": {-100: []}}
+        context = _make_context(group_admin_ids={-100: []})
 
         db = MagicMock()
         db.get_trusted_user_ids.return_value = {321, 654}
@@ -477,7 +497,7 @@ class TestIsUserAdminOrTrusted:
         assert db.get_trusted_user_ids.call_count == 1
 
         # Cache is now a set.
-        cached = context.bot_data["trusted_user_ids"]
+        cached = context.state.trusted_user_ids
         assert isinstance(cached, set)
         assert cached == {321, 654}
 
@@ -488,25 +508,20 @@ class TestIsUserAdminOrTrusted:
 
     @patch("bot.services.telegram_utils.get_database")
     def test_returns_false_for_unknown_user_with_populated_cache(self, mock_get_database):
-        context = MagicMock()
-        context.bot_data = {
-            "group_admin_ids": {-100: []},
-            "trusted_user_ids": {1, 2},
-        }
+        context = _make_context(group_admin_ids={-100: []}, trusted_user_ids={1, 2})
 
         assert is_user_admin_or_trusted(context, -100, 999) is False
         mock_get_database.assert_not_called()
 
     @patch("bot.services.telegram_utils.get_database")
     def test_runtime_error_caches_empty_set(self, mock_get_database):
-        context = MagicMock()
-        context.bot_data = {"group_admin_ids": {-100: []}}
+        context = _make_context(group_admin_ids={-100: []})
 
         mock_get_database.side_effect = RuntimeError("Database not initialized")
 
         assert is_user_admin_or_trusted(context, -100, 321) is False
         # Empty set cached so retries don't hit DB again.
-        assert context.bot_data["trusted_user_ids"] == set()
+        assert context.state.trusted_user_ids == set()
 
         # Second call: no additional DB call attempted.
         assert is_user_admin_or_trusted(context, -100, 321) is False
@@ -569,22 +584,22 @@ class TestFetchGroupAdminIds:
         assert result == expected_ids
 
     async def test_fetch_admins_bad_request(self, mock_bot):
-        """Test handling of BadRequest exception."""
-        mock_bot.get_chat_administrators.side_effect = BadRequest("Group not found")
+        """Test handling of TelegramBadRequest exception."""
+        mock_bot.get_chat_administrators.side_effect = _bad_request("Group not found")
 
         with pytest.raises(Exception, match="Failed to fetch admins from group"):
             await fetch_group_admin_ids(mock_bot, group_id=456)
 
     async def test_fetch_admins_forbidden(self, mock_bot):
-        """Test handling of Forbidden exception."""
-        mock_bot.get_chat_administrators.side_effect = Forbidden("Bot not in group")
+        """Test handling of TelegramForbiddenError exception."""
+        mock_bot.get_chat_administrators.side_effect = _forbidden("Bot not in group")
 
         with pytest.raises(Exception, match="Failed to fetch admins from group"):
             await fetch_group_admin_ids(mock_bot, group_id=456)
 
     async def test_fetch_admins_bot_not_in_group(self, mock_bot):
         """Test when bot is not in the group."""
-        mock_bot.get_chat_administrators.side_effect = Forbidden("Bot not in group")
+        mock_bot.get_chat_administrators.side_effect = _forbidden("Bot not in group")
 
         with pytest.raises(Exception, match="Failed to fetch admins from group"):
             await fetch_group_admin_ids(mock_bot, group_id=-1001234567890)
@@ -637,13 +652,13 @@ class TestFetchGroupAdminIds:
         admin.user.is_bot = False
         mock_bot.get_chat_administrators.return_value = [admin]
 
-        result = await fetch_group_admin_ids(mock_bot, group_id=123)
+        result = await fetch_group_admin_ids(mock_bot, group_id=456)
 
         assert result == [9999999999]
 
     async def test_fetch_admins_exception_includes_group_id(self, mock_bot):
         """Test that exception message includes group ID."""
-        mock_bot.get_chat_administrators.side_effect = BadRequest("Group not found")
+        mock_bot.get_chat_administrators.side_effect = _bad_request("Group not found")
 
         with pytest.raises(Exception) as exc_info:
             await fetch_group_admin_ids(mock_bot, group_id=456)
@@ -651,15 +666,15 @@ class TestFetchGroupAdminIds:
         assert "456" in str(exc_info.value)
 
     async def test_fetch_admins_different_exceptions(self, mock_bot):
-        """Test that both BadRequest and Forbidden raise Exception."""
-        # Test BadRequest
-        mock_bot.get_chat_administrators.side_effect = BadRequest("Error")
+        """Test that both TelegramBadRequest and TelegramForbiddenError raise."""
+        # Test TelegramBadRequest
+        mock_bot.get_chat_administrators.side_effect = _bad_request("Error")
 
         with pytest.raises(Exception):
             await fetch_group_admin_ids(mock_bot, group_id=456)
 
-        # Test Forbidden
-        mock_bot.get_chat_administrators.side_effect = Forbidden("Error")
+        # Test TelegramForbiddenError
+        mock_bot.get_chat_administrators.side_effect = _forbidden("Error")
 
         with pytest.raises(Exception):
             await fetch_group_admin_ids(mock_bot, group_id=456)
@@ -685,7 +700,7 @@ class TestFetchGroupAdminIds:
 
 
 class TestSendMessageWithRetry:
-    """send_message_with_retry handles RetryAfter correctly."""
+    """send_message_with_retry handles TelegramRetryAfter correctly."""
 
     async def test_success_no_retry(self):
         """Normal success: no retry, no sleep, returns True."""
@@ -702,7 +717,7 @@ class TestSendMessageWithRetry:
         bot = MagicMock()
         bot.send_message = AsyncMock(
             side_effect=[
-                RetryAfter(retry_after=2),
+                _retry_after(2),
                 MagicMock(),
             ]
         )
@@ -716,10 +731,10 @@ class TestSendMessageWithRetry:
         mock_sleep.assert_called_once_with(3)
 
     async def test_gives_up_after_second_retry_after(self):
-        """Second RetryAfter: returns False."""
+        """Second TelegramRetryAfter: returns False."""
         bot = MagicMock()
         bot.send_message = AsyncMock(
-            side_effect=RetryAfter(retry_after=1),
+            side_effect=_retry_after(1),
         )
 
         with patch("bot.services.telegram_utils.asyncio.sleep") as mock_sleep:
@@ -732,16 +747,16 @@ class TestSendMessageWithRetry:
     async def test_propagates_other_telegram_error(self):
         """Non-RetryAfter TelegramError re-raises (caller's except catches it)."""
         bot = MagicMock()
-        bot.send_message = AsyncMock(side_effect=BadRequest("User not found"))
+        bot.send_message = AsyncMock(side_effect=_bad_request("User not found"))
 
-        with pytest.raises(BadRequest):
+        with pytest.raises(TelegramBadRequest):
             await send_message_with_retry(bot, chat_id=-100, text="hello")
 
         bot.send_message.assert_awaited_once()
 
 
 class TestRestrictChatMemberWithRetry:
-    """restrict_chat_member_with_retry handles RetryAfter correctly."""
+    """restrict_chat_member_with_retry handles TelegramRetryAfter correctly."""
 
     async def test_success_no_retry(self):
         """Normal success: returns True."""
@@ -764,7 +779,7 @@ class TestRestrictChatMemberWithRetry:
         permissions = MagicMock()
         bot.restrict_chat_member = AsyncMock(
             side_effect=[
-                RetryAfter(retry_after=2),
+                _retry_after(2),
                 MagicMock(),
             ]
         )
@@ -780,11 +795,11 @@ class TestRestrictChatMemberWithRetry:
         mock_sleep.assert_called_once_with(3)
 
     async def test_gives_up_after_second_retry_after(self):
-        """Second RetryAfter: returns False."""
+        """Second TelegramRetryAfter: returns False."""
         bot = MagicMock()
         permissions = MagicMock()
         bot.restrict_chat_member = AsyncMock(
-            side_effect=RetryAfter(retry_after=1),
+            side_effect=_retry_after(1),
         )
 
         with patch("bot.services.telegram_utils.asyncio.sleep") as mock_sleep:
@@ -801,10 +816,10 @@ class TestRestrictChatMemberWithRetry:
         bot = MagicMock()
         permissions = MagicMock()
         bot.restrict_chat_member = AsyncMock(
-            side_effect=BadRequest("User not found"),
+            side_effect=_bad_request("User not found"),
         )
 
-        with pytest.raises(BadRequest):
+        with pytest.raises(TelegramBadRequest):
             await restrict_chat_member_with_retry(
                 bot, chat_id=-100, user_id=123, permissions=permissions,
             )

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from bot.dispatch import AppState, HandlerContext
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.plugins.config import (
     guard_plugin,
@@ -353,24 +354,22 @@ class TestIsPluginEnabledForGroup:
         assert is_plugin_enabled_for_group({}, -100111, "profile_monitor") is True
 
 class TestPluginManagerComputeEffectiveMap:
-    """PluginManager.compute_effective_map stores result in app.bot_data."""
+    """PluginManager.compute_effective_map stores result in state.plugin_effective_map."""
 
-    def test_stores_in_bot_data(self):
-        """compute_effective_map stores result under bot_data['plugin_effective_map']."""
+    def test_stores_in_state(self):
+        """compute_effective_map stores result under state.plugin_effective_map."""
         gc = GroupConfig(group_id=-100111, warning_topic_id=42)
         reg = GroupRegistry()
         reg.register(gc)
         settings = MagicMock()
         settings.plugins_default = {}
-        app = MagicMock()
-        app.bot_data = {}
+        state = AppState()
 
         pm = PluginManager()
-        pm.compute_effective_map(settings, reg, app)
+        pm.compute_effective_map(settings, reg, state)
 
-        assert "plugin_effective_map" in app.bot_data
-        assert -100111 in app.bot_data["plugin_effective_map"]
-        assert app.bot_data["plugin_effective_map"][-100111]["profile_monitor"] is True
+        assert -100111 in state.plugin_effective_map
+        assert state.plugin_effective_map[-100111]["profile_monitor"] is True
 
     def test_stores_returns_effective_map(self):
         """compute_effective_map returns the computed effective map."""
@@ -379,20 +378,19 @@ class TestPluginManagerComputeEffectiveMap:
         reg.register(gc)
         settings = MagicMock()
         settings.plugins_default = {}
-        app = MagicMock()
-        app.bot_data = {}
+        state = AppState()
 
         pm = PluginManager()
-        result = pm.compute_effective_map(settings, reg, app)
+        result = pm.compute_effective_map(settings, reg, state)
 
         assert isinstance(result, dict)
         assert -100111 in result
         assert result[-100111]["profile_monitor"] is True
-        # bot_data also set
-        assert app.bot_data["plugin_effective_map"] is result
+        # state also set
+        assert state.plugin_effective_map is result
 
     def test_multiple_groups_in_map(self):
-        """Multiple groups each get correct toggle map in bot_data."""
+        """Multiple groups each get correct toggle map in state."""
         gc1 = GroupConfig(group_id=-100111, warning_topic_id=42)
         gc2 = GroupConfig(group_id=-100222, warning_topic_id=42, plugins={"profile_monitor": False})
         reg = GroupRegistry()
@@ -400,13 +398,12 @@ class TestPluginManagerComputeEffectiveMap:
         reg.register(gc2)
         settings = MagicMock()
         settings.plugins_default = {}
-        app = MagicMock()
-        app.bot_data = {}
+        state = AppState()
 
         pm = PluginManager()
-        pm.compute_effective_map(settings, reg, app)
+        pm.compute_effective_map(settings, reg, state)
 
-        map_ = app.bot_data["plugin_effective_map"]
+        map_ = state.plugin_effective_map
         assert map_[-100111]["profile_monitor"] is True
         assert map_[-100222]["profile_monitor"] is False
 
@@ -415,22 +412,27 @@ class TestGuardPlugin:
 
     @staticmethod
     def _make_mock_update(chat_id: int, chat_type: str = "supergroup") -> MagicMock:
-        """Create a mock update with effective_chat."""
+        """Create a mock update whose message carries the chat, so
+        effective_chat(update) resolves it."""
         update = MagicMock()
         chat = MagicMock()
         chat.id = chat_id
         chat.type = chat_type
-        update.effective_chat = chat
+        message = MagicMock()
+        message.chat = chat
+        update.message = message
+        update.edited_message = None
+        update.callback_query = None
+        update.chat_member = None
         return update
 
     @staticmethod
-    def _make_mock_context(effective_map: dict | None = None) -> MagicMock:
-        """Create a mock context with bot_data."""
-        context = MagicMock()
-        context.bot_data = {}
+    def _make_context(effective_map: dict | None = None) -> HandlerContext:
+        """Create a real HandlerContext with the given effective map."""
+        state = AppState()
         if effective_map is not None:
-            context.bot_data["plugin_effective_map"] = effective_map
-        return context
+            state.plugin_effective_map = effective_map
+        return HandlerContext(bot=MagicMock(), state=state)
 
     async def test_enabled_plugin_calls_callback(self):
         """Enabled plugin for group -> callback called normally."""
@@ -438,7 +440,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({-100111: {"profile_monitor": True}})
+        context = self._make_context({-100111: {"profile_monitor": True}})
 
         await wrapped(update, context)
 
@@ -450,7 +452,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({-100111: {"profile_monitor": False}})
+        context = self._make_context({-100111: {"profile_monitor": False}})
 
         await wrapped(update, context)
 
@@ -462,7 +464,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(-100999)
-        context = self._make_mock_context({-100111: {"profile_monitor": False}})
+        context = self._make_context({-100111: {"profile_monitor": False}})
 
         await wrapped(update, context)
 
@@ -474,20 +476,19 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({})
+        context = self._make_context({})
 
         await wrapped(update, context)
 
         callback.assert_awaited_once_with(update, context)
 
     async def test_missing_effective_map_passes_through(self):
-        """bot_data missing plugin_effective_map -> callback called."""
+        """state missing plugin_effective_map -> callback called."""
         callback = AsyncMock()
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(-100111)
-        context = MagicMock()
-        context.bot_data = {}
+        context = self._make_context()
 
         await wrapped(update, context)
 
@@ -499,7 +500,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(12345, chat_type="private")
-        context = self._make_mock_context({-100111: {"profile_monitor": False}})
+        context = self._make_context({-100111: {"profile_monitor": False}})
 
         await wrapped(update, context)
 
@@ -511,8 +512,12 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = MagicMock()
+        update.message = None
+        update.edited_message = None
+        update.callback_query = None
+        update.chat_member = None
         update.effective_chat = None
-        context = self._make_mock_context({-100111: {"profile_monitor": False}})
+        context = self._make_context({-100111: {"profile_monitor": False}})
 
         await wrapped(update, context)
 
@@ -529,13 +534,13 @@ class TestGuardPlugin:
 
         # Group A: disabled
         update_a = self._make_mock_update(-100111)
-        context_a = self._make_mock_context(effective_map)
+        context_a = self._make_context(effective_map)
         await wrapped_a(update_a, context_a)
         callback_a.assert_not_awaited()
 
         # Group B: enabled
         update_b = self._make_mock_update(-100222)
-        context_b = self._make_mock_context(effective_map)
+        context_b = self._make_context(effective_map)
         await wrapped_b(update_b, context_b)
         callback_b.assert_awaited_once_with(update_b, context_b)
 
@@ -545,7 +550,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("topic_guard")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({-100111: {"topic_guard": True}})
+        context = self._make_context({-100111: {"topic_guard": True}})
 
         await wrapped(update, context)
 
@@ -557,7 +562,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("topic_guard")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({-100111: {"topic_guard": False}})
+        context = self._make_context({-100111: {"topic_guard": False}})
 
         await wrapped(update, context)
 
@@ -569,7 +574,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("inline_keyboard_spam")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({-100111: {"inline_keyboard_spam": False}})
+        context = self._make_context({-100111: {"inline_keyboard_spam": False}})
 
         await wrapped(update, context)
 
@@ -585,7 +590,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("some_unknown_plugin")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({-100111: {"profile_monitor": True}})
+        context = self._make_context({-100111: {"profile_monitor": True}})
 
         await wrapped(update, context)
 
@@ -607,7 +612,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(-100111, chat_type="channel")
-        context = self._make_mock_context({-100111: {"profile_monitor": False}})
+        context = self._make_context({-100111: {"profile_monitor": False}})
 
         await wrapped(update, context)
 
@@ -619,7 +624,7 @@ class TestGuardPlugin:
         wrapped = guard_plugin("profile_monitor")(callback)
 
         update = self._make_mock_update(-100111)
-        context = self._make_mock_context({-100111: {"profile_monitor": True}})
+        context = self._make_context({-100111: {"profile_monitor": True}})
 
         await wrapped(update, context, "extra_arg", key="value")
 
@@ -728,23 +733,18 @@ class TestRegisteredGroupsMatchDefinitions:
             "refresh_admin_ids_job",
         }
 
-        app = MagicMock()
+        from bot.dispatch import AppState
 
-        # PTB's add_handler defaults to group 0 when the arg is omitted.
+        state = AppState()
+
         for name, registrar in handler_registrars.items():
-            app.add_handler.reset_mock()
-            registrar(app)
-            groups = [
-                c.kwargs.get("group", c.args[1] if len(c.args) > 1 else 0)
-                for c in app.add_handler.call_args_list
-            ]
-            assert groups, f"{name}: registrar added no handlers"
-            assert all(
-                g == defs_by_name[name]["handler_group"] for g in groups
-            ), (
-                f"{name}: registered at groups={groups}, "
-                f"definitions say {defs_by_name[name]['handler_group']}"
-            )
+            specs = registrar(state)
+            assert specs, f"{name}: registrar returned no specs"
+            for spec in specs:
+                assert spec.group == defs_by_name[name]["handler_group"], (
+                    f"{name}: spec group={spec.group}, "
+                    f"definitions say {defs_by_name[name]['handler_group']}"
+                )
 
         # The registrar map above must cover every non-job plugin.
         for name in MANIFEST_ORDER:
@@ -845,16 +845,16 @@ class TestRegisterAllErrorHandling:
 
     def test_register_all_propagates_registrar_exception(self):
         """If a registrar raises, the exception propagates to caller."""
+        from bot.dispatch import AppState
         from bot.plugins.manager import PluginManager
 
-        app = MagicMock()
-        app.bot_data = {}
+        state = AppState()
 
         pm = PluginManager()
 
-        def failing_registrar(application):
+        def failing_registrar(state):
             raise RuntimeError("captcha registrar failed")
         pm._registry["captcha"] = failing_registrar
 
         with pytest.raises(RuntimeError, match="captcha registrar failed"):
-            pm.register_all(app)
+            pm.register_all(state)

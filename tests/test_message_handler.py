@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot.database.service import init_database, reset_database
+from bot.dispatch import AppState, HandlerContext
 from bot.group_config import GroupConfig
 from bot.handlers.message import handle_message
 from bot.services.user_checker import ProfileCheckResult
@@ -31,16 +32,17 @@ def mock_update():
     update.message.from_user.username = "testuser"
     update.message.from_user.full_name = "Test User"
     update.message.from_user.is_bot = False
-    update.effective_chat = MagicMock()
-    update.effective_chat.id = -1001234567890
     return update
 
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = AsyncMock()
-    return context
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.restrict_chat_member = AsyncMock()
+    bot.get_me = AsyncMock()
+    state = AppState()
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 @pytest.fixture
@@ -71,8 +73,6 @@ class TestHandleMessage:
         mock_context.bot.send_message.assert_not_called()
 
     async def test_wrong_group(self, mock_update, mock_context):
-        mock_update.effective_chat.id = -100999999  # Different group
-
         with patch("bot.handlers.message.get_group_config_for_update", return_value=None):
             await handle_message(mock_update, mock_context)
 

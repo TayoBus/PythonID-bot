@@ -3,8 +3,9 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram import Chat, Message, User
-from telegram.ext import ApplicationHandlerStop
+from aiogram.types import Message, User
+
+from bot.dispatch import AppState, HandlerContext, StopPropagation
 
 from bot.group_config import GroupConfig
 from bot.handlers.bio_bait import (
@@ -182,11 +183,10 @@ class TestUserBioCache:
 
     @pytest.fixture
     def context(self):
-        ctx = MagicMock()
-        ctx.bot_data = {}
-        ctx.bot = MagicMock()
-        ctx.bot.get_chat = AsyncMock()
-        return ctx
+        bot = MagicMock()
+        bot.get_chat = AsyncMock()
+        state = AppState()
+        return HandlerContext(bot=bot, state=state, args=[])
 
     async def test_fetch_and_cache(self, context):
         chat = MagicMock()
@@ -195,7 +195,7 @@ class TestUserBioCache:
 
         bio = await get_cached_user_bio(context, 42)
         assert bio == "hello world"
-        assert 42 in context.bot_data[USER_BIO_CACHE_KEY]
+        assert 42 in context.state.data[USER_BIO_CACHE_KEY]
 
     async def test_cache_hit_skips_api(self, context):
         chat = MagicMock()
@@ -213,7 +213,7 @@ class TestUserBioCache:
 
         bio = await get_cached_user_bio(context, 9)
         assert bio is None
-        assert context.bot_data[USER_BIO_CACHE_KEY][9][1] is None
+        assert context.state.data[USER_BIO_CACHE_KEY][9][1] is None
 
     async def test_missing_bio_attribute_cached_as_none(self, context):
         chat = MagicMock(spec=[])  # no bio attribute
@@ -227,15 +227,15 @@ class TestUserBioCache:
         bio = await get_cached_user_bio(context, 13)
         assert bio is None
         # Failures ARE cached (with shorter TTL) to prevent repeated API calls.
-        assert 13 in context.bot_data.get(USER_BIO_CACHE_KEY, {})
+        assert 13 in context.state.data.get(USER_BIO_CACHE_KEY, {})
         # Verify it's a failure sentinel
-        cached = context.bot_data[USER_BIO_CACHE_KEY][13]
+        cached = context.state.data[USER_BIO_CACHE_KEY][13]
         assert cached[1] == "__FAILURE__"
 
     def test_clear_cache(self, context):
-        context.bot_data[USER_BIO_CACHE_KEY] = {42: (123.0, "x")}
+        context.state.data[USER_BIO_CACHE_KEY] = {42: (123.0, "x")}
         clear_cached_user_bio(context, 42)
-        assert 42 not in context.bot_data[USER_BIO_CACHE_KEY]
+        assert 42 not in context.state.data[USER_BIO_CACHE_KEY]
 
     def test_clear_cache_missing(self, context):
         # Should not raise even if the entry doesn't exist.
@@ -245,7 +245,7 @@ class TestUserBioCache:
         """Cache eviction removes oldest entries when at max size."""
         from time import monotonic
 
-        cache = context.bot_data.setdefault(USER_BIO_CACHE_KEY, {})
+        cache = context.state.data.setdefault(USER_BIO_CACHE_KEY, {})
         now = monotonic()
         # Fill cache to max
         for i in range(USER_BIO_CACHE_MAX_SIZE):
@@ -291,22 +291,21 @@ class TestHandleBioBaitSpam:
         update.message.caption = None
         update.message.message_id = 100
         update.message.delete = AsyncMock()
-        update.effective_chat = MagicMock(spec=Chat)
-        update.effective_chat.id = -100
         return update
 
     @pytest.fixture
     def mock_context(self):
-        context = MagicMock()
-        context.bot_data = {"group_admin_ids": {-100: [1, 2]}}
-        context.bot = MagicMock()
-        context.bot.restrict_chat_member = AsyncMock()
-        context.bot.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.restrict_chat_member = AsyncMock()
+        bot.send_message = AsyncMock()
         # Default: empty bio so bio-link branch won't trigger unintentionally.
         chat = MagicMock()
         chat.bio = ""
-        context.bot.get_chat = AsyncMock(return_value=chat)
-        return context
+        bot.get_chat = AsyncMock(return_value=chat)
+        state = AppState()
+        state.group_admin_ids = {-100: [1, 2]}
+        state.trusted_user_ids = set()
+        return HandlerContext(bot=bot, state=state, args=[])
 
     async def test_skips_no_message(self, mock_context, group_config):
         update = MagicMock()
@@ -358,7 +357,7 @@ class TestHandleBioBaitSpam:
         self, mock_update, mock_context, group_config
     ):
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
 
         mock_update.message.delete.assert_called_once()
@@ -372,7 +371,7 @@ class TestHandleBioBaitSpam:
         mock_update.message.text = None
         mock_update.message.caption = "lihat bio aku"
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
         mock_update.message.delete.assert_called_once()
 
@@ -385,7 +384,7 @@ class TestHandleBioBaitSpam:
         mock_context.bot.get_chat = AsyncMock(return_value=chat)
 
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
 
         mock_update.message.delete.assert_called_once()
@@ -412,7 +411,7 @@ class TestHandleBioBaitSpam:
         mock_context.bot.get_chat = AsyncMock(return_value=chat)
 
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
         mock_update.message.delete.assert_called_once()
 
@@ -425,16 +424,16 @@ class TestHandleBioBaitSpam:
         mock_context.bot.get_chat = AsyncMock(return_value=chat)
 
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
 
-        cache = mock_context.bot_data.get(USER_BIO_CACHE_KEY, {})
+        cache = mock_context.state.data.get(USER_BIO_CACHE_KEY, {})
         assert mock_update.message.from_user.id not in cache
 
     async def test_delete_failure_continues(self, mock_update, mock_context, group_config):
         mock_update.message.delete = AsyncMock(side_effect=Exception("Delete failed"))
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
         mock_context.bot.restrict_chat_member.assert_called_once()
         mock_context.bot.send_message.assert_called_once()
@@ -444,7 +443,7 @@ class TestHandleBioBaitSpam:
     ):
         mock_context.bot.restrict_chat_member = AsyncMock(side_effect=Exception("Restrict failed"))
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
         mock_context.bot.send_message.assert_called_once()
         call_kwargs = mock_context.bot.send_message.call_args.kwargs
@@ -460,7 +459,7 @@ class TestHandleBioBaitSpam:
         mock_context.bot.restrict_chat_member = AsyncMock(side_effect=Exception("fail"))
 
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
         call_kwargs = mock_context.bot.send_message.call_args.kwargs
         assert "Bio Profil" in call_kwargs["text"]
@@ -471,7 +470,7 @@ class TestHandleBioBaitSpam:
     ):
         mock_context.bot.send_message = AsyncMock(side_effect=Exception("Send failed"))
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
 
     async def test_monitor_only_sends_owner_alert(
@@ -518,22 +517,20 @@ class TestBioBaitReviewFixes:
         update.message.caption = None
         update.message.message_id = 100
         update.message.delete = AsyncMock()
-        update.effective_chat = MagicMock(spec=Chat)
-        update.effective_chat.id = -1001234567890
         return update
 
     @pytest.fixture
     def mock_context(self):
-        context = MagicMock()
-        context.bot_data = {}
-        context.bot_data["group_admin_ids"] = {-1001234567890: [1, 2]}
-        context.bot = MagicMock()
-        context.bot.restrict_chat_member = AsyncMock()
-        context.bot.send_message = AsyncMock()
+        bot = MagicMock()
+        bot.restrict_chat_member = AsyncMock()
+        bot.send_message = AsyncMock()
         chat = MagicMock()
         chat.bio = ""
-        context.bot.get_chat = AsyncMock(return_value=chat)
-        return context
+        bot.get_chat = AsyncMock(return_value=chat)
+        state = AppState()
+        state.group_admin_ids = {-1001234567890: [1, 2]}
+        state.trusted_user_ids = set()
+        return HandlerContext(bot=bot, state=state, args=[])
 
     # ── (a) trusted user bypass ──
 
@@ -541,8 +538,8 @@ class TestBioBaitReviewFixes:
         self, mock_update, mock_context, group_config
     ):
         """Trusted user (not admin) should bypass bio bait detection."""
-        mock_context.bot_data["trusted_user_ids"] = {42}
-        mock_context.bot_data["group_admin_ids"] = {-1001234567890: [1, 2]}
+        mock_context.state.trusted_user_ids = {42}
+        mock_context.state.group_admin_ids = {-1001234567890: [1, 2]}
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
             await handle_bio_bait_spam(mock_update, mock_context)
         mock_update.message.delete.assert_not_called()
@@ -560,7 +557,7 @@ class TestBioBaitReviewFixes:
         mock_update.message.text = "cek bio aku"
 
         with patch("bot.handlers.bio_bait.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_bio_bait_spam(mock_update, mock_context)
 
         # Only the warning-topic notification should be sent, not the owner alert
@@ -603,12 +600,12 @@ class TestBioBaitRegistrationFilter:
         """Non-text group message must pass bio-bait filter."""
         from datetime import datetime
 
-        from telegram import Chat, Message, Update, User
+        from aiogram.types import Chat, Message, Update, User
 
         from bot.handlers.bio_bait import BIO_BAIT_FILTER
 
         user = User(id=42, is_bot=False, first_name="Test")
-        chat = Chat(id=-100, type=Chat.GROUP, title="Test")
+        chat = Chat(id=-100, type="group", title="Test")
         msg = Message(
             message_id=1,
             date=datetime.now(),
@@ -617,7 +614,7 @@ class TestBioBaitRegistrationFilter:
         )
         update = Update(update_id=1, message=msg)
 
-        assert BIO_BAIT_FILTER.check_update(update) is True, (
+        assert BIO_BAIT_FILTER(update) is True, (
             "Bio-bait filter MUST accept non-text messages for bio-link detection"
         )
 
@@ -625,12 +622,12 @@ class TestBioBaitRegistrationFilter:
         """Text group message must still pass bio-bait filter."""
         from datetime import datetime
 
-        from telegram import Chat, Message, Update, User
+        from aiogram.types import Chat, Message, Update, User
 
         from bot.handlers.bio_bait import BIO_BAIT_FILTER
 
         user = User(id=42, is_bot=False, first_name="Test")
-        chat = Chat(id=-100, type=Chat.GROUP, title="Test")
+        chat = Chat(id=-100, type="group", title="Test")
         msg = Message(
             message_id=2,
             date=datetime.now(),
@@ -640,18 +637,18 @@ class TestBioBaitRegistrationFilter:
         )
         update = Update(update_id=2, message=msg)
 
-        assert BIO_BAIT_FILTER.check_update(update) is True
+        assert BIO_BAIT_FILTER(update) is True
 
     def test_filter_excludes_group_commands(self):
         """Command messages must be excluded by bio-bait filter."""
         from datetime import datetime
 
-        from telegram import Chat, Message, MessageEntity, Update, User
+        from aiogram.types import Chat, Message, MessageEntity, Update, User
 
         from bot.handlers.bio_bait import BIO_BAIT_FILTER
 
         user = User(id=42, is_bot=False, first_name="Test")
-        chat = Chat(id=-100, type=Chat.GROUP, title="Test")
+        chat = Chat(id=-100, type="group", title="Test")
         msg = Message(
             message_id=3,
             date=datetime.now(),
@@ -662,7 +659,7 @@ class TestBioBaitRegistrationFilter:
         )
         update = Update(update_id=3, message=msg)
 
-        assert BIO_BAIT_FILTER.check_update(update) is False, (
+        assert BIO_BAIT_FILTER(update) is False, (
             "Bio-bait filter MUST exclude commands"
         )
 
@@ -672,9 +669,8 @@ class TestGetCachedUserBio:
 
     async def test_caches_failures(self):
         """Test that bio fetch failures are cached to prevent repeated API calls."""
-        mock_context = MagicMock()
-        mock_context.bot_data = {}
-        mock_context.bot = AsyncMock()
+        bot = AsyncMock()
+        mock_context = HandlerContext(bot=bot, state=AppState(), args=[])
 
         # First call fails
         mock_context.bot.get_chat.side_effect = Exception("API error")
@@ -689,16 +685,15 @@ class TestGetCachedUserBio:
 
     async def test_failure_cache_expires(self):
         """Test that cached failures expire and retry after TTL."""
-        mock_context = MagicMock()
-        mock_context.bot_data = {}
-        mock_context.bot = AsyncMock()
+        bot = AsyncMock()
+        mock_context = HandlerContext(bot=bot, state=AppState(), args=[])
 
         # First call fails
         mock_context.bot.get_chat.side_effect = Exception("API error")
         await get_cached_user_bio(mock_context, user_id=123)
 
         # Advance time past failure TTL
-        cache = mock_context.bot_data[USER_BIO_CACHE_KEY]
+        cache = mock_context.state.data[USER_BIO_CACHE_KEY]
         cached_entry = cache[123]
         # Set TTL to past (negative value means expired)
         cache[123] = (cached_entry[0] - 400, cached_entry[1])  # 400 seconds ago
@@ -724,8 +719,10 @@ class TestSendMonitorAlertToOwner:
 
     async def test_propagates_send_error_to_except(self, mock_context):
         """Non-RetryAfter error re-raises; caught by outer except Exception, returns False."""
-        from telegram.error import BadRequest
-        mock_context.bot.send_message = AsyncMock(side_effect=BadRequest("Test error"))
+        from aiogram.exceptions import TelegramBadRequest
+        mock_context.bot.send_message = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="Test error")
+        )
 
         result = await send_monitor_alert_to_owner(
             context=mock_context,
@@ -742,9 +739,11 @@ class TestSendMonitorAlertToOwner:
 
     async def test_retry_after_failure_returns_false(self, mock_context):
         """Second RetryAfter in send_message_with_retry returns False; logs and returns False."""
-        from telegram.error import RetryAfter
+        from aiogram.exceptions import TelegramRetryAfter
         mock_context.bot.send_message = AsyncMock(
-            side_effect=RetryAfter(retry_after=1)
+            side_effect=TelegramRetryAfter(
+                method=MagicMock(), message="Flood control", retry_after=1
+            )
         )
 
         with patch("bot.services.telegram_utils.asyncio.sleep"):

@@ -10,10 +10,10 @@ from bot.group_config import GroupConfig, GroupRegistry
 from bot.services.user_checker import ProfileCheckResult
 from bot.handlers.captcha import (
     captcha_callback_handler,
-    captcha_timeout_callback,
     chat_member_handler,
     new_member_handler,
 )
+from bot.services.captcha_recovery import captcha_timeout_callback
 
 
 @pytest.fixture
@@ -33,18 +33,37 @@ def mock_registry(group_config):
     return registry
 
 
+JOB_NAME = "captcha_timeout_-1001234567890_12345"
+
+
+def _schedule_timeout(context):
+    """Schedule a real captcha timeout job on the fixture scheduler."""
+    from bot.services.captcha_recovery import schedule_captcha_timeout
+
+    schedule_captcha_timeout(
+        context.state,
+        group_id=-1001234567890,
+        user_id=12345,
+        chat_id=-1001234567890,
+        message_id=999,
+        user_full_name="Test User",
+        delay_seconds=300,
+    )
+
+
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = AsyncMock()
-    context.bot.restrict_chat_member = AsyncMock()
-    context.bot.send_message = AsyncMock()
-    context.bot.ban_chat_member = AsyncMock()
-    context.bot.edit_message_text = AsyncMock()
-    context.job_queue = MagicMock()
-    context.job_queue.run_once = MagicMock()
-    context.job_queue.get_jobs_by_name = MagicMock(return_value=[])
-    return context
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from bot.dispatch import AppState, HandlerContext
+
+    bot = AsyncMock()
+    bot.restrict_chat_member = AsyncMock()
+    bot.send_message = AsyncMock()
+    bot.ban_chat_member = AsyncMock()
+    bot.edit_message_text = AsyncMock()
+    state = AppState(bot=bot, scheduler=AsyncIOScheduler())
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 @pytest.fixture
@@ -81,7 +100,8 @@ class TestNewMemberHandler:
         self, mock_update_new_member, mock_context, group_config, temp_db
     ):
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
@@ -97,7 +117,8 @@ class TestNewMemberHandler:
         self, mock_update_new_member, mock_context, group_config, temp_db
     ):
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
@@ -117,7 +138,8 @@ class TestNewMemberHandler:
         from bot.database.service import get_database
 
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
@@ -135,18 +157,18 @@ class TestNewMemberHandler:
         self, mock_update_new_member, mock_context, group_config, temp_db
     ):
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
         with patch("bot.handlers.captcha.get_group_config_for_update", return_value=group_config):
             await new_member_handler(mock_update_new_member, mock_context)
 
-        mock_context.job_queue.run_once.assert_called_once()
-        call_args = mock_context.job_queue.run_once.call_args
-        assert call_args.kwargs["when"] == 300
-        assert call_args.kwargs["name"] == "captcha_timeout_-1001234567890_12345"
-        assert call_args.kwargs["data"]["user_id"] == 12345
+        job = mock_context.state.scheduler.get_job("captcha_timeout_-1001234567890_12345")
+        assert job is not None
+        assert job.kwargs["user_id"] == 12345
+        assert job.kwargs["group_id"] == -1001234567890
 
     async def test_captcha_disabled_skips_check(
         self, mock_update_new_member, mock_context, temp_db
@@ -246,10 +268,12 @@ class TestCaptchaCallbackHandler:
         query = MagicMock()
         query.data = f"captcha_verify_{group_id}_{user_id}"
         query.from_user = MagicMock(id=user_id, full_name=full_name, username=username)
-        query.message.chat_id = group_id
+        query.message = MagicMock()
+        query.message.chat = MagicMock()
+        query.message.chat.id = group_id
         query.message.message_id = 999
+        query.message.edit_text = AsyncMock()
         query.answer = AsyncMock()
-        query.edit_message_text = AsyncMock()
         return query
 
     async def test_captcha_callback_verifies_correct_user(
@@ -343,8 +367,8 @@ class TestCaptchaCallbackHandler:
         ):
             await captcha_callback_handler(update, mock_context)
 
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert "Terima kasih" in call_args.kwargs["text"]
 
     async def test_wrong_user_rejected(self, mock_context, mock_registry, temp_db):
@@ -388,7 +412,7 @@ class TestCaptchaCallbackHandler:
 
         await captcha_callback_handler(update, mock_context)
 
-        mock_context.job_queue.get_jobs_by_name.assert_not_called()
+        assert mock_context.state.scheduler.get_jobs() == []
 
     async def test_no_query_data_does_nothing(self, mock_context):
         query = MagicMock()
@@ -400,7 +424,7 @@ class TestCaptchaCallbackHandler:
 
         await captcha_callback_handler(update, mock_context)
 
-        mock_context.job_queue.get_jobs_by_name.assert_not_called()
+        assert mock_context.state.scheduler.get_jobs() == []
 
     async def test_cancels_timeout_job(self, mock_context, mock_registry, temp_db):
         from bot.database.service import get_database
@@ -416,9 +440,8 @@ class TestCaptchaCallbackHandler:
             )
         )
 
-        mock_job = MagicMock()
-        mock_job.schedule_removal = MagicMock()
-        mock_context.job_queue.get_jobs_by_name.return_value = [mock_job]
+        _schedule_timeout(mock_context)
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is not None
 
         query = self._make_callback_query()
 
@@ -432,10 +455,7 @@ class TestCaptchaCallbackHandler:
         ):
             await captcha_callback_handler(update, mock_context)
 
-        mock_context.job_queue.get_jobs_by_name.assert_called_once_with(
-            "captcha_timeout_-1001234567890_12345"
-        )
-        mock_job.schedule_removal.assert_called_once()
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is None
 
     async def test_unrestrict_failure_keeps_user_restricted(
         self, mock_context, mock_registry, temp_db
@@ -457,9 +477,7 @@ class TestCaptchaCallbackHandler:
             )
         )
 
-        mock_job = MagicMock()
-        mock_job.schedule_removal = MagicMock()
-        mock_context.job_queue.get_jobs_by_name.return_value = [mock_job]
+        _schedule_timeout(mock_context)
 
         query = self._make_callback_query()
 
@@ -476,11 +494,11 @@ class TestCaptchaCallbackHandler:
         # Pending captcha preserved so the user can retry.
         assert db.get_pending_captcha(12345, -1001234567890) is not None
         # No success message edit.
-        query.edit_message_text.assert_not_called()
+        query.message.edit_text.assert_not_called()
         # User sees the failure alert exactly once.
         query.answer.assert_called_once_with(CAPTCHA_FAILED_VERIFICATION_MESSAGE, show_alert=True)
         # Timeout job was NOT cancelled (still armed for retry safety).
-        mock_job.schedule_removal.assert_not_called()
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is not None
 
     async def test_db_finalization_failure_after_successful_unrestrict(
         self, mock_context, mock_registry, temp_db
@@ -501,9 +519,7 @@ class TestCaptchaCallbackHandler:
             )
         )
 
-        mock_job = MagicMock()
-        mock_job.schedule_removal = MagicMock()
-        mock_context.job_queue.get_jobs_by_name.return_value = [mock_job]
+        _schedule_timeout(mock_context)
 
         query = self._make_callback_query()
 
@@ -519,9 +535,9 @@ class TestCaptchaCallbackHandler:
             await captcha_callback_handler(update, mock_context)
 
         # User is already unrestricted — success message IS shown.
-        query.edit_message_text.assert_called_once()
+        query.message.edit_text.assert_called_once()
         # Timeout job IS cancelled even though DB failed.
-        mock_job.schedule_removal.assert_called_once()
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is None
 
     async def test_duplicate_callback_delivery_ignored(
         self, mock_context, mock_registry, temp_db
@@ -558,7 +574,7 @@ class TestCaptchaCallbackHandler:
 
         # Bare ack so the client's spinner clears — no alert, no success edit.
         query.answer.assert_called_once_with()
-        query.edit_message_text.assert_not_called()
+        query.message.edit_text.assert_not_called()
         # Unrestrict WAS called (it runs first), but probation is NOT re-run.
         mock_unrestrict.assert_called_once()
         mock_probation.assert_not_called()
@@ -580,7 +596,7 @@ class TestCaptchaCallbackHandler:
         )
 
         query = self._make_callback_query()
-        query.edit_message_text.side_effect = Exception("Edit failed")
+        query.message.edit_text = AsyncMock(side_effect=Exception("Edit failed"))
 
         update = MagicMock()
         update.callback_query = query
@@ -619,9 +635,11 @@ class TestCaptchaCallbackHandler:
         query.from_user.username = None
         query.from_user.full_name = "Test User"
         query.data = "captcha_verify_-1001234567890_12345"
-        query.message.chat_id = -1001234567890
+        query.message = MagicMock()
+        query.message.chat = MagicMock()
+        query.message.chat.id = -1001234567890
         query.message.message_id = 999
-        query.edit_message_text = AsyncMock()
+        query.message.edit_text = AsyncMock()
 
         update = MagicMock()
         update.callback_query = query
@@ -638,7 +656,7 @@ class TestCaptchaCallbackHandler:
         expected = CAPTCHA_INCOMPLETE_PROFILE_MESSAGE.format(missing_text="username")
         assert call_args.args[0] == expected
         assert call_args.kwargs["show_alert"] is True
-        query.edit_message_text.assert_not_called()
+        query.message.edit_text.assert_not_called()
         assert db.get_pending_captcha(12345, -1001234567890) is not None
 
     async def test_unknown_group_in_callback_rejects(
@@ -692,6 +710,8 @@ class TestCaptchaCallbackHandler:
         update = MagicMock()
         update.callback_query = query
 
+        _schedule_timeout(mock_context)
+
         with (
             patch("bot.handlers.captcha.get_group_registry", return_value=mock_registry),
             patch("bot.handlers.captcha.check_user_profile",
@@ -709,7 +729,8 @@ class TestCaptchaCallbackHandler:
         assert call_args.args[0] == expected
         mock_unrestrict.assert_not_called()
         assert db.get_pending_captcha(12345, -1001234567890) is not None
-        mock_context.job_queue.get_jobs_by_name.assert_not_called()
+        # Timeout job not cancelled on incomplete-profile rejection.
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is not None
 
 
     async def test_captcha_callback_profile_check_exception(
@@ -734,6 +755,8 @@ class TestCaptchaCallbackHandler:
         update = MagicMock()
         update.callback_query = query
 
+        _schedule_timeout(mock_context)
+
         with (
             patch("bot.handlers.captcha.get_group_registry", return_value=mock_registry),
             patch("bot.handlers.captcha.check_user_profile", side_effect=Exception("API error")),
@@ -743,8 +766,9 @@ class TestCaptchaCallbackHandler:
 
         query.answer.assert_called_once_with(CAPTCHA_PROFILE_CHECK_FAILED_MESSAGE, show_alert=True)
         mock_unrestrict.assert_not_called()
+        # Timeout job still armed after profile-check failure.
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is not None
         assert db.get_pending_captcha(12345, -1001234567890) is not None
-        mock_context.job_queue.get_jobs_by_name.assert_not_called()
 
     async def test_captcha_callback_incomplete_profile_timeout_not_cancelled(
         self, mock_context, mock_registry, temp_db
@@ -762,9 +786,7 @@ class TestCaptchaCallbackHandler:
             )
         )
 
-        mock_job = MagicMock()
-        mock_job.schedule_removal = MagicMock()
-        mock_context.job_queue.get_jobs_by_name.return_value = [mock_job]
+        _schedule_timeout(mock_context)
 
         query = self._make_callback_query()
 
@@ -777,8 +799,8 @@ class TestCaptchaCallbackHandler:
         ):
             await captcha_callback_handler(update, mock_context)
 
-        mock_context.job_queue.get_jobs_by_name.assert_not_called()
-        mock_job.schedule_removal.assert_not_called()
+        # Timeout job still armed after incomplete-profile rejection.
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is not None
 
     @pytest.mark.parametrize("bad_data", [
         "captcha_verify_baddata",          # non-numeric, single token
@@ -802,7 +824,7 @@ class TestCaptchaCallbackHandler:
         query.answer.assert_called_once_with(
             CAPTCHA_FAILED_VERIFICATION_MESSAGE, show_alert=True
         )
-        query.edit_message_text.assert_not_called()
+        query.message.edit_text.assert_not_called()
 
     async def test_spoofed_message_id_rejected(
         self, mock_context, mock_registry, temp_db
@@ -858,7 +880,7 @@ class TestCaptchaCallbackHandler:
         )
 
         query = self._make_callback_query()
-        query.message.chat_id = -1009999999999  # different from pending.chat_id
+        query.message.chat.id = -1009999999999  # different from pending.chat_id
 
         update = MagicMock()
         update.callback_query = query
@@ -893,9 +915,7 @@ class TestCaptchaCallbackHandler:
             )
         )
 
-        mock_job = MagicMock()
-        mock_job.schedule_removal = MagicMock()
-        mock_context.job_queue.get_jobs_by_name.return_value = [mock_job]
+        _schedule_timeout(mock_context)
 
         query = self._make_callback_query()
 
@@ -930,9 +950,11 @@ class TestCaptchaCallbackHandler:
         # Pending captcha is now cleaned up
         assert db.get_pending_captcha(12345, -1001234567890) is None
         # Success message was shown on retry
-        query.edit_message_text.assert_called_once()
-        call_args = query.edit_message_text.call_args
+        query.message.edit_text.assert_called_once()
+        call_args = query.message.edit_text.call_args
         assert CAPTCHA_VERIFIED_MESSAGE.split("{")[0] in call_args.kwargs["text"]
+        # Timeout job cancelled on successful retry
+        assert mock_context.state.scheduler.get_job(JOB_NAME) is None
 
 
 class TestGetHandlers:
@@ -943,21 +965,20 @@ class TestGetHandlers:
         assert isinstance(handlers, list)
         assert len(handlers) == 3
 
-    def test_get_handlers_contains_message_handler(self):
-        from telegram.ext import MessageHandler
-
+    def test_get_handlers_are_specs(self):
+        from bot.dispatch import HandlerSpec
         from bot.handlers.captcha import get_handlers
 
         handlers = get_handlers()
-        assert any(isinstance(h, MessageHandler) for h in handlers)
+        assert all(isinstance(h, HandlerSpec) for h in handlers)
+        assert all(h.group == 0 for h in handlers)
 
-    def test_get_handlers_contains_callback_handler(self):
-        from telegram.ext import CallbackQueryHandler
-
+    def test_get_handlers_covers_update_kinds(self):
         from bot.handlers.captcha import get_handlers
 
         handlers = get_handlers()
-        assert any(isinstance(h, CallbackQueryHandler) for h in handlers)
+        kinds = {kind for h in handlers for kind in h.update_kinds}
+        assert {"chat_member", "message", "edited_message", "callback_query"} <= kinds
 
 
 class TestCaptchaTimeoutCallback:
@@ -975,17 +996,14 @@ class TestCaptchaTimeoutCallback:
             )
         )
 
-        job = MagicMock()
-        job.data = {
-            "user_id": 12345,
-            "group_id": -1001234567890,
-            "chat_id": -1001234567890,
-            "message_id": 999,
-            "user_full_name": "Test User",
-        }
-        mock_context.job = job
-
-        await captcha_timeout_callback(mock_context)
+        await captcha_timeout_callback(
+            state=mock_context.state,
+            user_id=12345,
+            group_id=-1001234567890,
+            chat_id=-1001234567890,
+            message_id=999,
+            user_full_name="Test User",
+        )
 
         mock_context.bot.ban_chat_member.assert_not_called()
 
@@ -1003,17 +1021,14 @@ class TestCaptchaTimeoutCallback:
             )
         )
 
-        job = MagicMock()
-        job.data = {
-            "user_id": 12345,
-            "group_id": -1001234567890,
-            "chat_id": -1001234567890,
-            "message_id": 999,
-            "user_full_name": "Test User",
-        }
-        mock_context.job = job
-
-        await captcha_timeout_callback(mock_context)
+        await captcha_timeout_callback(
+            state=mock_context.state,
+            user_id=12345,
+            group_id=-1001234567890,
+            chat_id=-1001234567890,
+            message_id=999,
+            user_full_name="Test User",
+        )
 
         assert db.get_pending_captcha(12345, -1001234567890) is None
 
@@ -1031,17 +1046,14 @@ class TestCaptchaTimeoutCallback:
             )
         )
 
-        job = MagicMock()
-        job.data = {
-            "user_id": 12345,
-            "group_id": -1001234567890,
-            "chat_id": -1001234567890,
-            "message_id": 999,
-            "user_full_name": "Test User",
-        }
-        mock_context.job = job
-
-        await captcha_timeout_callback(mock_context)
+        await captcha_timeout_callback(
+            state=mock_context.state,
+            user_id=12345,
+            group_id=-1001234567890,
+            chat_id=-1001234567890,
+            message_id=999,
+            user_full_name="Test User",
+        )
 
         mock_context.bot.edit_message_text.assert_called_once()
         call_args = mock_context.bot.edit_message_text.call_args
@@ -1050,35 +1062,45 @@ class TestCaptchaTimeoutCallback:
         assert "tidak menyelesaikan verifikasi" in call_args.kwargs["text"]
 
     async def test_already_verified_skips_actions(self, mock_context, temp_db):
-        job = MagicMock()
-        job.data = {
-            "user_id": 12345,
-            "group_id": -1001234567890,
-            "chat_id": -1001234567890,
-            "message_id": 999,
-            "user_full_name": "Test User",
-        }
-        mock_context.job = job
-
-        await captcha_timeout_callback(mock_context)
+        await captcha_timeout_callback(
+            state=mock_context.state,
+            user_id=12345,
+            group_id=-1001234567890,
+            chat_id=-1001234567890,
+            message_id=999,
+            user_full_name="Test User",
+        )
 
         mock_context.bot.edit_message_text.assert_not_called()
 
-    async def test_no_job_does_nothing(self, mock_context):
-        mock_context.job = None
+    async def test_no_bot_does_nothing(self, mock_context, temp_db):
+        """Without a bot on state, the timeout callback is a graceful no-op
+        and the pending captcha row is preserved."""
+        from bot.database.service import get_database
 
-        await captcha_timeout_callback(mock_context)
+        db = get_database()
+        db.add_pending_captcha(
+            CaptchaData(
+                user_id=12345,
+                group_id=-1001234567890,
+                chat_id=-1001234567890,
+                message_id=999,
+                user_full_name="Test User",
+            )
+        )
 
-        mock_context.bot.edit_message_text.assert_not_called()
+        mock_context.state.bot = None
 
-    async def test_no_job_data_does_nothing(self, mock_context):
-        job = MagicMock()
-        job.data = None
-        mock_context.job = job
+        await captcha_timeout_callback(
+            state=mock_context.state,
+            user_id=12345,
+            group_id=-1001234567890,
+            chat_id=-1001234567890,
+            message_id=999,
+            user_full_name="Test User",
+        )
 
-        await captcha_timeout_callback(mock_context)
-
-        mock_context.bot.edit_message_text.assert_not_called()
+        assert db.get_pending_captcha(12345, -1001234567890) is not None
 
     async def test_edit_message_failure_in_timeout_continues_gracefully(
         self, mock_context, temp_db
@@ -1098,17 +1120,14 @@ class TestCaptchaTimeoutCallback:
 
         mock_context.bot.edit_message_text.side_effect = Exception("Edit failed")
 
-        job = MagicMock()
-        job.data = {
-            "user_id": 12345,
-            "group_id": -1001234567890,
-            "chat_id": -1001234567890,
-            "message_id": 999,
-            "user_full_name": "Test User",
-        }
-        mock_context.job = job
-
-        await captcha_timeout_callback(mock_context)
+        await captcha_timeout_callback(
+            state=mock_context.state,
+            user_id=12345,
+            group_id=-1001234567890,
+            chat_id=-1001234567890,
+            message_id=999,
+            user_full_name="Test User",
+        )
 
         assert db.get_pending_captcha(12345, -1001234567890) is None
 
@@ -1143,12 +1162,13 @@ class TestChatMemberHandler:
         self, mock_context, group_config, temp_db
     ):
         """Test LEFT -> MEMBER transition triggers captcha."""
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         update = self.create_chat_member_update(ChatMemberStatus.LEFT, ChatMemberStatus.MEMBER)
 
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
@@ -1162,12 +1182,13 @@ class TestChatMemberHandler:
         self, mock_context, group_config, temp_db
     ):
         """Test BANNED -> MEMBER transition triggers captcha."""
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
-        update = self.create_chat_member_update(ChatMemberStatus.BANNED, ChatMemberStatus.MEMBER)
+        update = self.create_chat_member_update(ChatMemberStatus.KICKED, ChatMemberStatus.MEMBER)
 
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
@@ -1181,7 +1202,7 @@ class TestChatMemberHandler:
         self, mock_context, group_config, temp_db
     ):
         """Test MEMBER -> ADMINISTRATOR transition should NOT trigger captcha."""
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         update = self.create_chat_member_update(ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR)
 
@@ -1195,12 +1216,13 @@ class TestChatMemberHandler:
         self, mock_context, group_config, temp_db
     ):
         """Test LEFT -> RESTRICTED transition triggers captcha (user joined but auto-restricted)."""
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         update = self.create_chat_member_update(ChatMemberStatus.LEFT, ChatMemberStatus.RESTRICTED)
 
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
@@ -1215,7 +1237,7 @@ class TestChatMemberHandler:
     ):
         """Test that duplicate captcha is prevented in chat_member_handler."""
         from bot.database.service import get_database
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         db = get_database()
         db.add_pending_captcha(
@@ -1241,12 +1263,13 @@ class TestChatMemberHandler:
     ):
         """Test race condition handling when both handlers trigger simultaneously."""
         from sqlalchemy.exc import IntegrityError
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         update = self.create_chat_member_update(ChatMemberStatus.LEFT, ChatMemberStatus.MEMBER)
 
         sent_message = MagicMock()
-        sent_message.chat_id = -1001234567890
+        sent_message.chat = MagicMock()
+        sent_message.chat.id = -1001234567890
         sent_message.message_id = 999
         mock_context.bot.send_message.return_value = sent_message
 
@@ -1258,13 +1281,13 @@ class TestChatMemberHandler:
             await chat_member_handler(update, mock_context)
 
         # Should handle gracefully and not schedule timeout job
-        mock_context.job_queue.run_once.assert_not_called()
+        assert mock_context.state.scheduler.get_jobs() == []
 
     async def test_bot_member_skipped_in_chat_member(
         self, mock_context, group_config, temp_db
     ):
         """Test that bot members are skipped in chat_member_handler."""
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         update = self.create_chat_member_update(ChatMemberStatus.LEFT, ChatMemberStatus.MEMBER)
         update.chat_member.new_chat_member.user.is_bot = True
@@ -1279,7 +1302,7 @@ class TestChatMemberHandler:
         self, mock_context, temp_db
     ):
         """Test captcha disabled skips processing in chat_member_handler."""
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         disabled_config = GroupConfig(
             group_id=-1001234567890,
@@ -1299,7 +1322,7 @@ class TestChatMemberHandler:
         self, mock_context, temp_db
     ):
         """Test wrong group is skipped in chat_member_handler."""
-        from telegram.constants import ChatMemberStatus
+        from aiogram.enums import ChatMemberStatus
 
         update = self.create_chat_member_update(
             ChatMemberStatus.LEFT, ChatMemberStatus.MEMBER, group_id=-9999999999

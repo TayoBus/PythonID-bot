@@ -5,8 +5,18 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram import Chat, Message, User
-from telegram.ext import ApplicationHandlerStop
+from aiogram.enums import MessageEntityType
+from aiogram.types import (
+    Chat,
+    Message,
+    MessageEntity,
+    PhotoSize,
+    Sticker,
+    Update,
+    User,
+)
+
+from bot.dispatch import AppState, HandlerContext, StopPropagation
 
 from bot.group_config import GroupConfig
 from bot.handlers.duplicate_spam import (
@@ -20,6 +30,47 @@ from bot.handlers.duplicate_spam import (
 )
 
 DEFAULT_SIMILARITY = 0.95
+
+
+def _make_sticker(file_unique_id):
+    """Build a real aiogram Sticker with the given file_unique_id."""
+    return Sticker(
+        file_id=f"file_id_{file_unique_id}",
+        file_unique_id=file_unique_id,
+        width=100,
+        height=100,
+        is_animated=False,
+        is_video=False,
+        type="regular",
+    )
+
+
+def _make_photo(file_unique_id):
+    """Build a real aiogram photo size list with the given file_unique_id."""
+    return [
+        PhotoSize(
+            file_id=f"file_id_{file_unique_id}",
+            file_unique_id=file_unique_id,
+            width=100,
+            height=100,
+        )
+    ]
+
+
+def _make_media_update(message_id, *, sticker=None, photo=None, text=None):
+    """Build a real aiogram Update carrying a media-only (or text) message."""
+    user = User(id=42, is_bot=False, first_name="Test", username="testuser")
+    chat = Chat(id=-100, type="group", title="Test")
+    msg = Message(
+        message_id=message_id,
+        date=datetime.now(UTC),
+        chat=chat,
+        from_user=user,
+        text=text,
+        sticker=sticker,
+        photo=photo,
+    )
+    return Update(update_id=message_id, message=msg)
 
 
 class TestNormalizeText:
@@ -107,19 +158,20 @@ class TestGetRecentMessages:
     """Tests for the _get_recent_messages function."""
 
     def test_creates_new_deque(self):
-        context = MagicMock()
-        context.bot_data = {}
+        state = AppState()
+        context = HandlerContext(bot=MagicMock(), state=state, args=[])
         dq = _get_recent_messages(context, -100, 42)
         assert isinstance(dq, deque)
         assert len(dq) == 0
 
     def test_returns_existing_deque(self):
-        context = MagicMock()
         existing_dq = deque()
         existing_dq.append(
             RecentMessage(timestamp=datetime.now(UTC), normalized_text="test", message_id=1)
         )
-        context.bot_data = {RECENT_MESSAGES_KEY: {(-100, 42): existing_dq}}
+        state = AppState()
+        state.data = {RECENT_MESSAGES_KEY: {(-100, 42): existing_dq}}
+        context = HandlerContext(bot=MagicMock(), state=state, args=[])
         dq = _get_recent_messages(context, -100, 42)
         assert len(dq) == 1
 
@@ -151,8 +203,6 @@ class TestHandleDuplicateSpam:
         update.message.text = "Barangkali di sini ada yang sedang mencari kerja bisa menghubungi saya"
         update.message.caption = None
         update.message.message_id = 100
-        update.message.parse_entities.return_value = {}
-        update.message.parse_caption_entities.return_value = {}
         update.message.entities = []
         update.message.caption_entities = []
         update.message.sticker = None
@@ -163,19 +213,18 @@ class TestHandleDuplicateSpam:
         update.message.voice = None
         update.message.video_note = None
         update.message.photo = ()
-        update.effective_chat = MagicMock(spec=Chat)
-        update.effective_chat.id = -100
         return update
 
     @pytest.fixture
     def mock_context(self):
-        context = MagicMock()
-        context.bot_data = {"group_admin_ids": {-100: [1, 2]}}
-        context.bot = MagicMock()
-        context.bot.restrict_chat_member = AsyncMock()
-        context.bot.send_message = AsyncMock()
-        context.bot.delete_message = AsyncMock()
-        return context
+        bot = MagicMock()
+        bot.restrict_chat_member = AsyncMock()
+        bot.send_message = AsyncMock()
+        bot.delete_message = AsyncMock()
+        state = AppState()
+        state.group_admin_ids = {-100: [1, 2]}
+        state.trusted_user_ids = set()
+        return HandlerContext(bot=bot, state=state, args=[])
 
     async def test_skips_no_message(self, mock_context, group_config):
         update = MagicMock()
@@ -221,8 +270,8 @@ class TestHandleDuplicateSpam:
         existing_dq = deque([
             RecentMessage(timestamp=now, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
-        mock_context.bot_data["trusted_user_ids"] = {mock_update.message.from_user.id}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.trusted_user_ids = {mock_update.message.from_user.id}
 
         with (
             patch(
@@ -243,7 +292,7 @@ class TestHandleDuplicateSpam:
     ):
         """Admin cache hit must not perform any DB lookup."""
         mock_update.message.from_user.id = 1  # already in group_admin_ids
-        mock_context.bot_data["trusted_user_ids"] = set()
+        mock_context.state.trusted_user_ids = set()
 
         with (
             patch(
@@ -264,66 +313,49 @@ class TestHandleDuplicateSpam:
             await handle_duplicate_spam(mock_update, mock_context)
         mock_update.message.delete.assert_not_called()
 
-    async def test_identical_stickers_trigger_restriction(self, mock_update, mock_context, group_config):
+    async def test_identical_stickers_trigger_restriction(self, mock_context, group_config):
         """Media-only messages are compared by file_unique_id, not min_length."""
-        mock_update.message.text = None
-        sticker = MagicMock()
-        sticker.file_unique_id = "AgADA7X0stickerid"
-        mock_update.message.sticker = sticker
+        sticker = _make_sticker("AgADA7X0stickerid")
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
             with patch("bot.handlers.duplicate_spam.get_user_mention", return_value="@testuser"):
-                await handle_duplicate_spam(mock_update, mock_context)
-                mock_update.message.message_id = 101
-                with pytest.raises(ApplicationHandlerStop):
-                    await handle_duplicate_spam(mock_update, mock_context)
+                await handle_duplicate_spam(_make_media_update(100, sticker=sticker), mock_context)
+                with pytest.raises(StopPropagation):
+                    await handle_duplicate_spam(_make_media_update(101, sticker=sticker), mock_context)
 
         assert mock_context.bot.delete_message.call_count == 2
         mock_context.bot.restrict_chat_member.assert_called_once()
 
-    async def test_different_stickers_not_counted(self, mock_update, mock_context, group_config):
-        mock_update.message.text = None
+    async def test_different_stickers_not_counted(self, mock_context, group_config):
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
             for i in range(3):
-                sticker = MagicMock()
-                sticker.file_unique_id = f"AgADA7X0stickerid{i}"
-                mock_update.message.sticker = sticker
-                mock_update.message.message_id = 100 + i
-                await handle_duplicate_spam(mock_update, mock_context)
+                sticker = _make_sticker(f"AgADA7X0stickerid{i}")
+                await handle_duplicate_spam(_make_media_update(100 + i, sticker=sticker), mock_context)
 
-        mock_update.message.delete.assert_not_called()
+        mock_context.bot.delete_message.assert_not_called()
         mock_context.bot.restrict_chat_member.assert_not_called()
 
-    async def test_identical_photos_trigger_restriction(self, mock_update, mock_context, group_config):
-        mock_update.message.text = None
-        size = MagicMock()
-        size.file_unique_id = "AgADA7X0photoid"
-        mock_update.message.photo = (size,)
+    async def test_identical_photos_trigger_restriction(self, mock_context, group_config):
+        photo = _make_photo("AgADA7X0photoid")
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
             with patch("bot.handlers.duplicate_spam.get_user_mention", return_value="@testuser"):
-                await handle_duplicate_spam(mock_update, mock_context)
-                mock_update.message.message_id = 101
-                with pytest.raises(ApplicationHandlerStop):
-                    await handle_duplicate_spam(mock_update, mock_context)
+                await handle_duplicate_spam(_make_media_update(100, photo=photo), mock_context)
+                with pytest.raises(StopPropagation):
+                    await handle_duplicate_spam(_make_media_update(101, photo=photo), mock_context)
 
         assert mock_context.bot.delete_message.call_count == 2
         mock_context.bot.restrict_chat_member.assert_called_once()
 
-    async def test_media_and_text_keys_never_match(self, mock_update, mock_context, group_config):
+    async def test_media_and_text_keys_never_match(self, mock_context, group_config):
         """A media key must never be 'similar' to a text message's normalized text."""
-        sticker = MagicMock()
-        sticker.file_unique_id = "x" * 30
-        mock_update.message.sticker = sticker
-        mock_update.message.text = None
+        sticker = _make_sticker("x" * 30)
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            await handle_duplicate_spam(mock_update, mock_context)
-            mock_update.message.sticker = None
-            mock_update.message.text = "x" * 30
-            await handle_duplicate_spam(mock_update, mock_context)
+            await handle_duplicate_spam(_make_media_update(100, sticker=sticker), mock_context)
+            await handle_duplicate_spam(_make_media_update(101, text="x" * 30), mock_context)
 
-        mock_update.message.delete.assert_not_called()
+        mock_context.bot.delete_message.assert_not_called()
 
     async def test_skips_short_text(self, mock_update, mock_context, group_config):
         mock_update.message.text = "ok"
@@ -346,15 +378,17 @@ class TestHandleDuplicateSpam:
         """Bare t.me links normalize below min_length but must still be counted."""
         link = "t.me/spamchannel"
         mock_update.message.text = link
-        mock_update.message.parse_entities.return_value = {MagicMock(): link}
+        mock_update.message.entities = [
+            MessageEntity(type=MessageEntityType.URL, offset=0, length=len(link))
+        ]
         now = datetime.now(UTC)
         existing_dq = deque([
             RecentMessage(timestamp=now, normalized_text=normalize_text(link), message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
         assert mock_context.bot.delete_message.call_count == 2
@@ -365,7 +399,9 @@ class TestHandleDuplicateSpam:
     ):
         link = "https://github.com"
         mock_update.message.text = link
-        mock_update.message.parse_entities.return_value = {MagicMock(): link}
+        mock_update.message.entities = [
+            MessageEntity(type=MessageEntityType.URL, offset=0, length=len(link))
+        ]
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
             await handle_duplicate_spam(mock_update, mock_context)
@@ -384,10 +420,10 @@ class TestHandleDuplicateSpam:
         existing_dq = deque([
             RecentMessage(timestamp=now, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
         assert mock_context.bot.delete_message.call_count == 2
@@ -404,10 +440,10 @@ class TestHandleDuplicateSpam:
         existing_dq = deque([
             RecentMessage(timestamp=now, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
         assert mock_context.bot.delete_message.call_count == 2
@@ -418,7 +454,7 @@ class TestHandleDuplicateSpam:
         existing_dq = deque([
             RecentMessage(timestamp=old, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
             await handle_duplicate_spam(mock_update, mock_context)
@@ -431,7 +467,7 @@ class TestHandleDuplicateSpam:
             RecentMessage(timestamp=now, normalized_text="some completely different text here one", message_id=98),
             RecentMessage(timestamp=now, normalized_text="another totally different text here two", message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
             await handle_duplicate_spam(mock_update, mock_context)
@@ -445,10 +481,10 @@ class TestHandleDuplicateSpam:
         existing_dq = deque([
             RecentMessage(timestamp=now, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
         mock_context.bot.restrict_chat_member.assert_called_once()
@@ -460,10 +496,10 @@ class TestHandleDuplicateSpam:
         existing_dq = deque([
             RecentMessage(timestamp=now, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
         mock_context.bot.send_message.assert_called_once()
@@ -477,10 +513,10 @@ class TestHandleDuplicateSpam:
         existing_dq = deque([
             RecentMessage(timestamp=now, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
     async def test_third_message_also_triggers(self, mock_update, mock_context, group_config):
@@ -490,10 +526,10 @@ class TestHandleDuplicateSpam:
             RecentMessage(timestamp=now, normalized_text=norm, message_id=98),
             RecentMessage(timestamp=now, normalized_text=norm, message_id=99),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
         # Regression check: all prior duplicate messages must be deleted,
@@ -517,10 +553,10 @@ class TestHandleDuplicateSpam:
                 timestamp=now, normalized_text=norm, message_id=99, delete_attempted=True
             ),
         ])
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
+        mock_context.state.data[RECENT_MESSAGES_KEY] = {(-100, 42): existing_dq}
 
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await handle_duplicate_spam(mock_update, mock_context)
 
         mock_context.bot.delete_message.assert_called_once_with(
@@ -536,7 +572,7 @@ class TestHandleDuplicateSpam:
         with patch("bot.handlers.duplicate_spam.get_group_config_for_update", return_value=group_config):
             await handle_duplicate_spam(mock_update, mock_context)
 
-        assert mock_context.bot_data.get(RECENT_MESSAGES_KEY, {}) == {}
+        assert mock_context.state.data.get(RECENT_MESSAGES_KEY, {}) == {}
         mock_context.bot.delete_message.assert_not_called()
 
 
@@ -571,10 +607,12 @@ class TestRecentMessagesCacheEviction:
 
     @pytest.fixture
     def mock_context(self):
-        context = MagicMock()
-        context.bot_data = {"group_admin_ids": {-100: [1, 2]}}
-        context.bot.send_message = AsyncMock()
-        return context
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        state = AppState()
+        state.group_admin_ids = {-100: [1, 2]}
+        state.trusted_user_ids = set()
+        return HandlerContext(bot=bot, state=state, args=[])
 
     async def test_eviction_bounds_outer_dict(
         self, mock_update, mock_context, group_config
@@ -592,8 +630,8 @@ class TestRecentMessagesCacheEviction:
             recent_dict[(gid, uid)] = deque()
             last_touch_dict[(gid, uid)] = now - timedelta(hours=i * 24)
 
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = recent_dict
-        mock_context.bot_data["duplicate_spam_recent_last_touch"] = last_touch_dict
+        mock_context.state.data[RECENT_MESSAGES_KEY] = recent_dict
+        mock_context.state.data["duplicate_spam_recent_last_touch"] = last_touch_dict
 
         mock_update.message.from_user.id = 9999
 
@@ -603,7 +641,7 @@ class TestRecentMessagesCacheEviction:
         ):
             await handle_duplicate_spam(mock_update, mock_context)
 
-        outer = mock_context.bot_data[RECENT_MESSAGES_KEY]
+        outer = mock_context.state.data[RECENT_MESSAGES_KEY]
         assert len(outer) < max_size + overage, (
             f"Dict size {len(outer)} did not shrink below {max_size + overage}"
         )
@@ -636,8 +674,8 @@ class TestRecentMessagesCacheEviction:
             recent_dict[(gid, uid)] = deque()
             last_touch_dict[(gid, uid)] = now
 
-        mock_context.bot_data[RECENT_MESSAGES_KEY] = recent_dict
-        mock_context.bot_data["duplicate_spam_recent_last_touch"] = last_touch_dict
+        mock_context.state.data[RECENT_MESSAGES_KEY] = recent_dict
+        mock_context.state.data["duplicate_spam_recent_last_touch"] = last_touch_dict
 
         mock_update.message.from_user.id = 9999
 
@@ -647,7 +685,7 @@ class TestRecentMessagesCacheEviction:
         ):
             await handle_duplicate_spam(mock_update, mock_context)
 
-        outer = mock_context.bot_data[RECENT_MESSAGES_KEY]
+        outer = mock_context.state.data[RECENT_MESSAGES_KEY]
 
         # Recent entries survive
         for i in range(half, max_size):

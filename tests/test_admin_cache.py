@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from bot.dispatch import AppState
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.services.telegram_utils import TelegramAdminFetchError
 
@@ -48,7 +49,7 @@ def mock_registry():
 
 
 class TestRefreshAdminIds:
-    """refresh_admin_ids: fetch admin IDs for all groups, cache in bot_data."""
+    """refresh_admin_ids: fetch admin IDs for all groups, cache in state."""
 
     async def test_refresh_admin_ids_importable_from_admin_cache(self):
         """refresh_admin_ids is importable from bot.services.admin_cache."""
@@ -57,7 +58,7 @@ class TestRefreshAdminIds:
         assert callable(refresh_admin_ids)
 
     async def test_refresh_admin_ids_fetches_and_caches(self, mock_registry):
-        """refresh_admin_ids fetches admins and stores in bot_data."""
+        """refresh_admin_ids fetches admins and stores in state."""
         from bot.services.admin_cache import refresh_admin_ids
 
         bot = AsyncMock()
@@ -66,22 +67,21 @@ class TestRefreshAdminIds:
             MagicMock(user=MagicMock(id=222)),
         ]
 
-        context = MagicMock()
-        context.bot = bot
-        context.bot_data = {}
+        state = AppState()
+        state.bot = bot
 
         with patch(
             "bot.services.admin_cache.get_group_registry", return_value=mock_registry
         ):
             with patch("bot.services.admin_cache.fetch_group_admin_ids") as mock_fetch:
                 mock_fetch.return_value = [111, 222]
-                await refresh_admin_ids(context)
+                await refresh_admin_ids(state)
 
-        assert "group_admin_ids" in context.bot_data
-        assert "admin_ids" in context.bot_data
-        assert context.bot_data["group_admin_ids"][-1001234567890] == [111, 222]
-        assert 111 in context.bot_data["admin_ids"]
-        assert 222 in context.bot_data["admin_ids"]
+        assert state.group_admin_ids
+        assert state.admin_ids
+        assert state.group_admin_ids[-1001234567890] == [111, 222]
+        assert 111 in state.admin_ids
+        assert 222 in state.admin_ids
 
     async def test_refresh_admin_ids_multiple_groups(self):
         """refresh_admin_ids fetches admins for all groups in registry."""
@@ -92,9 +92,10 @@ class TestRefreshAdminIds:
         registry.register(GroupConfig(group_id=-100222, warning_topic_id=2))
 
         bot = AsyncMock()
-        context = MagicMock()
-        context.bot = bot
-        context.bot_data = {"group_admin_ids": {}, "admin_ids": []}
+        state = AppState()
+        state.bot = bot
+        state.group_admin_ids = {}
+        state.admin_ids = []
 
         with patch(
             "bot.services.admin_cache.get_group_registry", return_value=registry
@@ -107,34 +108,32 @@ class TestRefreshAdminIds:
                     return [222]
 
                 mock_fetch.side_effect = side_effect
-                await refresh_admin_ids(context)
+                await refresh_admin_ids(state)
 
-        assert -100111 in context.bot_data["group_admin_ids"]
-        assert -100222 in context.bot_data["group_admin_ids"]
-        assert context.bot_data["group_admin_ids"][-100111] == [111]
-        assert context.bot_data["group_admin_ids"][-100222] == [222]
-        assert set(context.bot_data["admin_ids"]) == {111, 222}
+        assert -100111 in state.group_admin_ids
+        assert -100222 in state.group_admin_ids
+        assert state.group_admin_ids[-100111] == [111]
+        assert state.group_admin_ids[-100222] == [222]
+        assert set(state.admin_ids) == {111, 222}
 
     async def test_refresh_admin_ids_fallback_on_error(self, mock_registry):
         """On fetch error, fallback to existing cached data."""
         from bot.services.admin_cache import refresh_admin_ids
 
-        context = MagicMock()
-        context.bot = AsyncMock()
-        context.bot_data = {
-            "group_admin_ids": {-1001234567890: [999]},
-            "admin_ids": [999],
-        }
+        state = AppState()
+        state.bot = AsyncMock()
+        state.group_admin_ids = {-1001234567890: [999]}
+        state.admin_ids = [999]
 
         with patch(
             "bot.services.admin_cache.get_group_registry", return_value=mock_registry
         ):
             with patch("bot.services.admin_cache.fetch_group_admin_ids") as mock_fetch:
                 mock_fetch.side_effect = TelegramAdminFetchError("API error")
-                await refresh_admin_ids(context)
+                await refresh_admin_ids(state)
 
-        assert context.bot_data["group_admin_ids"][-1001234567890] == [999]
-        assert context.bot_data["admin_ids"] == [999]
+        assert state.group_admin_ids[-1001234567890] == [999]
+        assert state.admin_ids == [999]
 
     async def test_refresh_admin_ids_not_importable_from_main(self):
         """refresh_admin_ids is NOT defined in main.py anymore."""
@@ -163,12 +162,10 @@ class TestPreloadAdminIds:
         registry.register(GroupConfig(group_id=-1002, warning_topic_id=2))
 
         mock_bot = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
-        mock_context.bot_data = {
-            "group_admin_ids": {-1001: [111], -1002: [333]},
-            "admin_ids": [111, 333],
-        }
+        state = AppState()
+        state.bot = mock_bot
+        state.group_admin_ids = {-1001: [111], -1002: [333]}
+        state.admin_ids = [111, 333]
 
         with (
             patch("bot.services.admin_cache.get_group_registry", return_value=registry),
@@ -178,11 +175,11 @@ class TestPreloadAdminIds:
                 [555, 666],  # -1001 success
                 [777],  # -1002 success
             ]
-            await preload_admin_ids(mock_context)
+            await preload_admin_ids(state)
 
-        assert mock_context.bot_data["group_admin_ids"][-1001] == [555, 666]
-        assert mock_context.bot_data["group_admin_ids"][-1002] == [777]
-        assert set(mock_context.bot_data["admin_ids"]) == {555, 666, 777}
+        assert state.group_admin_ids[-1001] == [555, 666]
+        assert state.group_admin_ids[-1002] == [777]
+        assert set(state.admin_ids) == {555, 666, 777}
 
     async def test_preload_admin_ids_preserves_cache_on_failure(self):
         """On fetch failure, preserve existing cached data for that group."""
@@ -193,12 +190,10 @@ class TestPreloadAdminIds:
         registry.register(GroupConfig(group_id=-1002, warning_topic_id=2))
 
         mock_bot = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
-        mock_context.bot_data = {
-            "group_admin_ids": {-1001: [111, 222], -1002: [333]},
-            "admin_ids": [111, 222, 333],
-        }
+        state = AppState()
+        state.bot = mock_bot
+        state.group_admin_ids = {-1001: [111, 222], -1002: [333]}
+        state.admin_ids = [111, 222, 333]
 
         with (
             patch("bot.services.admin_cache.get_group_registry", return_value=registry),
@@ -209,14 +204,14 @@ class TestPreloadAdminIds:
                 [444, 555],  # -1001 success
                 TelegramAdminFetchError("API error"),  # -1002 failure
             ]
-            await preload_admin_ids(mock_context)
+            await preload_admin_ids(state)
 
         # -1001 updated with new data
-        assert mock_context.bot_data["group_admin_ids"][-1001] == [444, 555]
+        assert state.group_admin_ids[-1001] == [444, 555]
         # -1002 preserved from existing cache (not empty list)
-        assert mock_context.bot_data["group_admin_ids"][-1002] == [333]
+        assert state.group_admin_ids[-1002] == [333]
         # admin_ids includes both new (-1001) and preserved (-1002)
-        assert set(mock_context.bot_data["admin_ids"]) == {333, 444, 555}
+        assert set(state.admin_ids) == {333, 444, 555}
 
     async def test_preload_admin_ids_no_existing_cache(self):
         """On failure with no existing cache, store empty list."""
@@ -226,19 +221,18 @@ class TestPreloadAdminIds:
         registry.register(GroupConfig(group_id=-1001, warning_topic_id=1))
 
         mock_bot = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.bot = mock_bot
-        mock_context.bot_data = {}
+        state = AppState()
+        state.bot = mock_bot
 
         with (
             patch("bot.services.admin_cache.get_group_registry", return_value=registry),
             patch("bot.services.admin_cache.fetch_group_admin_ids") as mock_fetch,
         ):
             mock_fetch.side_effect = TelegramAdminFetchError("API error")
-            await preload_admin_ids(mock_context)
+            await preload_admin_ids(state)
 
-        assert mock_context.bot_data["group_admin_ids"][-1001] == []
-        assert mock_context.bot_data["admin_ids"] == []
+        assert state.group_admin_ids[-1001] == []
+        assert state.admin_ids == []
 
 
 class TestDiskCache:
@@ -287,9 +281,8 @@ class TestDiskCache:
         registry = GroupRegistry()
         registry.register(GroupConfig(group_id=-1001, warning_topic_id=1))
 
-        mock_context = MagicMock()
-        mock_context.bot = AsyncMock()
-        mock_context.bot_data = {}
+        state = AppState()
+        state.bot = AsyncMock()
 
         with (
             patch.object(admin_cache, "CACHE_FILE_PATH", target),
@@ -297,7 +290,7 @@ class TestDiskCache:
             patch("bot.services.admin_cache.fetch_group_admin_ids") as mock_fetch,
         ):
             mock_fetch.side_effect = TelegramAdminFetchError("API error")
-            await refresh_admin_ids(mock_context)
+            await refresh_admin_ids(state)
 
         assert json.loads(target.read_text()) == {"-1001": [999]}
 
@@ -309,9 +302,8 @@ class TestDiskCache:
         target = tmp_path / "admin_cache.json"
         target.write_text('{"-1001": [999]}')
 
-        mock_context = MagicMock()
-        mock_context.bot = AsyncMock()
-        mock_context.bot_data = {}
+        state = AppState()
+        state.bot = AsyncMock()
 
         with (
             patch.object(admin_cache, "CACHE_FILE_PATH", target),
@@ -320,12 +312,12 @@ class TestDiskCache:
                 return_value=GroupRegistry(),
             ),
         ):
-            await refresh_admin_ids(mock_context)
+            await refresh_admin_ids(state)
 
         assert json.loads(target.read_text()) == {"-1001": [999]}
 
-    async def test_preload_seeds_from_disk_when_bot_data_empty(self, tmp_path):
-        """The disk cache is the fallback when bot_data has nothing yet."""
+    async def test_preload_seeds_from_disk_when_state_empty(self, tmp_path):
+        """The disk cache is the fallback when state has nothing yet."""
         from bot.services import admin_cache
         from bot.services.admin_cache import preload_admin_ids
 
@@ -335,9 +327,8 @@ class TestDiskCache:
         registry = GroupRegistry()
         registry.register(GroupConfig(group_id=-1001, warning_topic_id=1))
 
-        mock_context = MagicMock()
-        mock_context.bot = AsyncMock()
-        mock_context.bot_data = {}
+        state = AppState()
+        state.bot = AsyncMock()
 
         with (
             patch.object(admin_cache, "CACHE_FILE_PATH", target),
@@ -345,11 +336,11 @@ class TestDiskCache:
             patch("bot.services.admin_cache.fetch_group_admin_ids") as mock_fetch,
         ):
             mock_fetch.side_effect = TelegramAdminFetchError("API error")
-            await preload_admin_ids(mock_context)
+            await preload_admin_ids(state)
 
         # Seeded from disk, and the seeded admin stays visible to admin_ids.
-        assert mock_context.bot_data["group_admin_ids"][-1001] == [777]
-        assert mock_context.bot_data["admin_ids"] == [777]
+        assert state.group_admin_ids[-1001] == [777]
+        assert state.admin_ids == [777]
 
 
 class TestCachePathDerivation:
@@ -419,27 +410,28 @@ class TestFetchErrorHandling:
     """Only recoverable errors degrade to cache; programming errors propagate."""
 
     async def test_recoverable_error_falls_back_to_cache(self):
-        from telegram.error import TimedOut
+        from aiogram.exceptions import TelegramNetworkError
 
         from bot.services.admin_cache import refresh_admin_ids
 
         registry = GroupRegistry()
         registry.register(GroupConfig(group_id=-1001, warning_topic_id=1))
 
-        mock_context = MagicMock()
-        mock_context.bot = AsyncMock()
-        mock_context.bot_data = {"group_admin_ids": {-1001: [999]}, "admin_ids": [999]}
+        state = AppState()
+        state.bot = AsyncMock()
+        state.group_admin_ids = {-1001: [999]}
+        state.admin_ids = [999]
 
         with (
             patch("bot.services.admin_cache.get_group_registry", return_value=registry),
             patch(
                 "bot.services.admin_cache.fetch_group_admin_ids",
-                side_effect=TimedOut("timeout"),
+                side_effect=TelegramNetworkError(method=MagicMock(), message="timeout"),
             ),
         ):
-            await refresh_admin_ids(mock_context)
+            await refresh_admin_ids(state)
 
-        assert mock_context.bot_data["group_admin_ids"][-1001] == [999]
+        assert state.group_admin_ids[-1001] == [999]
 
     async def test_programming_error_is_not_swallowed(self):
         """A TypeError must surface, not masquerade as a failed fetch."""
@@ -448,9 +440,8 @@ class TestFetchErrorHandling:
         registry = GroupRegistry()
         registry.register(GroupConfig(group_id=-1001, warning_topic_id=1))
 
-        mock_context = MagicMock()
-        mock_context.bot = AsyncMock()
-        mock_context.bot_data = {}
+        state = AppState()
+        state.bot = AsyncMock()
 
         with (
             patch("bot.services.admin_cache.get_group_registry", return_value=registry),
@@ -460,7 +451,7 @@ class TestFetchErrorHandling:
             ),
         ):
             with pytest.raises(TypeError):
-                await refresh_admin_ids(mock_context)
+                await refresh_admin_ids(state)
 
 
 class TestConcurrentFetch:
@@ -484,16 +475,15 @@ class TestConcurrentFetch:
             await asyncio.wait_for(release.wait(), timeout=1)
             return [group_id]
 
-        mock_context = MagicMock()
-        mock_context.bot = AsyncMock()
-        mock_context.bot_data = {}
+        state = AppState()
+        state.bot = AsyncMock()
 
         with (
             patch("bot.services.admin_cache.get_group_registry", return_value=registry),
             patch("bot.services.admin_cache.fetch_group_admin_ids", side_effect=slow_fetch),
             patch("bot.services.admin_cache._save_admin_cache"),
         ):
-            await refresh_admin_ids(mock_context)
+            await refresh_admin_ids(state)
 
         assert len(started) == 3
-        assert set(mock_context.bot_data["group_admin_ids"]) == {-1001, -1002, -1003}
+        assert set(state.group_admin_ids) == {-1001, -1002, -1003}

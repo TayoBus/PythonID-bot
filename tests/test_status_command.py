@@ -9,6 +9,7 @@ import pytest
 
 from bot.database.models import CaptchaData
 from bot.database.service import get_database, init_database, reset_database
+from bot.dispatch import AppState, HandlerContext
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.handlers.status import handle_status
 
@@ -51,26 +52,26 @@ def mock_update():
     update.message.from_user = MagicMock()
     update.message.from_user.id = 12345
     update.message.from_user.full_name = "Admin User"
-    update.message.reply_text = AsyncMock()
-    update.effective_chat = MagicMock()
-    update.effective_chat.type = "private"
+    update.message.reply = AsyncMock()
+    update.message.answer = AsyncMock()
+    update.message.chat = MagicMock()
+    update.message.chat.type = "private"
     return update
 
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = MagicMock()
-    context.bot_data = {
-        "admin_ids": [12345],
-        "group_admin_ids": {-1001: [12345], -1002: [12345]},
-        "start_time": time.monotonic(),
-        "plugin_effective_map": {
-            -1001: {"captcha": True, "spam": True},
-            -1002: {"captcha": False, "spam": True, "profile_monitor": False},
-        },
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    state = AppState()
+    state.admin_ids = [12345]
+    state.group_admin_ids = {-1001: [12345], -1002: [12345]}
+    state.start_time = time.monotonic()
+    state.plugin_effective_map = {
+        -1001: {"captcha": True, "spam": True},
+        -1002: {"captcha": False, "spam": True, "profile_monitor": False},
     }
-    return context
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 class TestHandleStatus:
@@ -81,32 +82,32 @@ class TestHandleStatus:
         update.message = MagicMock()
         update.message.from_user = MagicMock()
         update.message.from_user.id = 12345
-        update.message.reply_text = AsyncMock()
-        update.effective_chat = MagicMock()
-        update.effective_chat.type = "group"
+        update.message.reply = AsyncMock()
+        update.message.chat = MagicMock()
+        update.message.chat.type = "group"
 
         await handle_status(update, mock_context)
 
-        update.message.reply_text.assert_called_once()
-        args, _ = update.message.reply_text.call_args
+        update.message.reply.assert_called_once()
+        args, _ = update.message.reply.call_args
         assert "chat pribadi" in args[0]
 
     async def test_handle_status_non_admin_rejected(self, mock_context):
         """Private chat but caller not admin → handler replies with no-permission."""
-        mock_context.bot_data["admin_ids"] = [99999]
+        mock_context.state.admin_ids = [99999]
         non_admin_update = MagicMock()
         non_admin_update.message = MagicMock()
         non_admin_update.message.from_user = MagicMock()
         non_admin_update.message.from_user.id = 111
         non_admin_update.message.from_user.full_name = "Bad Actor"
-        non_admin_update.message.reply_text = AsyncMock()
-        non_admin_update.effective_chat = MagicMock()
-        non_admin_update.effective_chat.type = "private"
+        non_admin_update.message.reply = AsyncMock()
+        non_admin_update.message.chat = MagicMock()
+        non_admin_update.message.chat.type = "private"
 
         await handle_status(non_admin_update, mock_context)
 
-        non_admin_update.message.reply_text.assert_called_once()
-        args, _ = non_admin_update.message.reply_text.call_args
+        non_admin_update.message.reply.assert_called_once()
+        args, _ = non_admin_update.message.reply.call_args
         assert "tidak memiliki izin" in args[0]
 
     async def test_handle_status_admin_success(
@@ -120,8 +121,8 @@ class TestHandleStatus:
         ):
             await handle_status(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        args, kwargs = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        args, kwargs = mock_update.message.reply.call_args
         text = args[0]
         assert "*Uptime:*" in text
         assert "*Grup yang kamu admin:*" in text
@@ -139,7 +140,7 @@ class TestHandleStatus:
         ):
             await handle_status(mock_update, mock_context)
 
-        args, _ = mock_update.message.reply_text.call_args
+        args, _ = mock_update.message.reply.call_args
         text = args[0]
         assert "Restriksi" in text or "Peringatan" in text
 
@@ -170,7 +171,7 @@ class TestHandleStatus:
         ):
             await handle_status(mock_update, mock_context)
 
-        args, _ = mock_update.message.reply_text.call_args
+        args, _ = mock_update.message.reply.call_args
         text = args[0]
         assert "Captcha: 1" in text
 
@@ -185,7 +186,7 @@ class TestHandleStatus:
         ):
             await handle_status(mock_update, mock_context)
 
-        args, _ = mock_update.message.reply_text.call_args
+        args, _ = mock_update.message.reply.call_args
         text = args[0]
         assert "Plugin nonaktif" in text
         assert "profile" in text and "monitor" in text
@@ -194,8 +195,8 @@ class TestHandleStatus:
         self, mock_update, mock_context, mock_registry, mock_settings,
     ):
         """Timestamps for last jobs appear in status reply."""
-        mock_context.bot_data["last_admin_refresh"] = time.time() - 60
-        mock_context.bot_data["last_auto_restrict"] = time.time() - 300
+        mock_context.state.data["last_admin_refresh"] = time.time() - 60
+        mock_context.state.data["last_auto_restrict"] = time.time() - 300
 
         with (
             patch("bot.handlers.status.get_group_registry", return_value=mock_registry),
@@ -204,7 +205,7 @@ class TestHandleStatus:
         ):
             await handle_status(mock_update, mock_context)
 
-        args, _ = mock_update.message.reply_text.call_args
+        args, _ = mock_update.message.reply.call_args
         text = args[0]
         assert "Refresh admin:" in text
         assert "Auto-restrict:" in text
@@ -221,7 +222,7 @@ class TestHandleStatus:
         ):
             await handle_status(mock_update, mock_context)
 
-        args, _ = mock_update.message.reply_text.call_args
+        args, _ = mock_update.message.reply.call_args
         text = args[0]
         assert "Tidak ada grup yang dipantau" in text
 
@@ -236,7 +237,7 @@ class TestHandleStatus:
         ):
             await handle_status(mock_update, mock_context)
 
-        args, _ = mock_update.message.reply_text.call_args
+        args, _ = mock_update.message.reply.call_args
         text = args[0]
         assert "-1001" in text
         assert "-1002" not in text
