@@ -277,7 +277,15 @@ async def captcha_callback_handler(
         return
 
     if callback_user_id != target_user_id:
-        await query.answer(CAPTCHA_WRONG_USER_MESSAGE, show_alert=True)
+        logger.info(
+            "captcha: user %s clicked captcha button for target %s (group %s); "
+            "sending not-for-you alert",
+            callback_user_id,
+            target_user_id,
+            group_id,
+        )
+        answered = await query.answer(CAPTCHA_WRONG_USER_MESSAGE, show_alert=True)
+        logger.info("captcha: not-for-you alert answered=%s", answered)
         return
 
     db = get_database()
