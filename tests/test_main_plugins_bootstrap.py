@@ -3,7 +3,7 @@
 Verifies that:
 1. PluginManager maps every MANIFEST_ORDER name to a registrar callable.
 2. register_all() registers handlers in MANIFEST_ORDER.
-3. Plugin metadata is stored in bot_data.
+3. Plugin metadata is stored in state.plugin_handlers.
 4. main() uses PluginManager.register_all instead of manual registration wall.
 """
 
@@ -11,6 +11,7 @@ import sys
 from unittest.mock import MagicMock, patch
 
 import bot.plugins.manager as pm_module
+from bot.dispatch import AppState
 from bot.plugins.definitions import MANIFEST_ORDER
 
 
@@ -57,12 +58,7 @@ class TestRegisterAll:
         """register_all calls every registrar exactly once."""
         from bot.plugins.manager import PluginManager
 
-        app = MagicMock()
-        app.bot_data = {}
-        job_queue = MagicMock()
-        job_queue.run_repeating = MagicMock()
-        app.job_queue = job_queue
-        app.add_handler = MagicMock()
+        state = AppState()
 
         pm = PluginManager()
         for name in MANIFEST_ORDER:
@@ -70,88 +66,61 @@ class TestRegisterAll:
             wrapped = MagicMock(wraps=original)
             pm._registry[name] = wrapped
 
-        result = pm.register_all(app)
+        result = pm.register_all(state)
 
         for name in MANIFEST_ORDER:
-            pm._registry[name].assert_called_once_with(app)
+            pm._registry[name].assert_called_once_with(state)
 
         assert set(result.keys()) == set(MANIFEST_ORDER)
 
     def test_register_all_returns_handler_lists(self):
-        """register_all returns dict mapping name to list of handlers."""
+        """register_all returns dict mapping name to list of handler specs."""
         from bot.plugins.manager import PluginManager
 
-        app = MagicMock()
-        app.bot_data = {}
-        job_queue = MagicMock()
-        job_queue.run_repeating = MagicMock()
-        app.job_data = {}
-        app.job_queue = job_queue
-        app.add_handler = MagicMock()
-
         pm = PluginManager()
-        result = pm.register_all(app)
+        result = pm.register_all(AppState())
 
         for name in MANIFEST_ORDER:
             assert isinstance(result[name], list)
 
-    def test_register_all_stores_metadata_in_bot_data(self):
-        """register_all stores registration results in bot_data['plugin_handlers']."""
+    def test_register_all_stores_metadata_in_state(self):
+        """register_all stores registration results in state.plugin_handlers."""
         from bot.plugins.manager import PluginManager
 
-        app = MagicMock()
-        app.bot_data = {}
-        job_queue = MagicMock()
-        job_queue.run_repeating = MagicMock()
-        app.job_data = {}
-        app.job_queue = job_queue
-        app.add_handler = MagicMock()
+        state = AppState()
 
         pm = PluginManager()
-        pm.register_all(app)
+        pm.register_all(state)
 
-        assert "plugin_handlers" in app.bot_data
-        metadata = app.bot_data["plugin_handlers"]
+        metadata = state.plugin_handlers
         assert set(metadata.keys()) == set(MANIFEST_ORDER)
 
     def test_register_all_stores_metadata_with_handler_group(self):
-        """bot_data['plugin_handlers'][name] includes handler_group."""
+        """state.plugin_handlers[name] includes handler_group."""
         from bot.plugins.definitions import get_plugin_definitions
         from bot.plugins.manager import PluginManager
 
         defs_by_name = {d["name"]: d for d in get_plugin_definitions()}
 
-        app = MagicMock()
-        app.bot_data = {}
-        job_queue = MagicMock()
-        job_queue.run_repeating = MagicMock()
-        app.job_data = {}
-        app.job_queue = job_queue
-        app.add_handler = MagicMock()
+        state = AppState()
 
         pm = PluginManager()
-        pm.register_all(app)
+        pm.register_all(state)
 
         for name in MANIFEST_ORDER:
-            assert app.bot_data["plugin_handlers"][name]["handler_group"] == defs_by_name[name]["handler_group"]
+            assert state.plugin_handlers[name]["handler_group"] == defs_by_name[name]["handler_group"]
 
     def test_register_all_stores_handlers_in_metadata(self):
-        """bot_data['plugin_handlers'][name] includes handlers list."""
+        """state.plugin_handlers[name] includes handlers list."""
         from bot.plugins.manager import PluginManager
 
-        app = MagicMock()
-        app.bot_data = {}
-        job_queue = MagicMock()
-        job_queue.run_repeating = MagicMock()
-        app.job_data = {}
-        app.job_queue = job_queue
-        app.add_handler = MagicMock()
+        state = AppState()
 
         pm = PluginManager()
-        result = pm.register_all(app)
+        result = pm.register_all(state)
 
         for name in MANIFEST_ORDER:
-            assert app.bot_data["plugin_handlers"][name]["handlers"] == result[name]
+            assert state.plugin_handlers[name]["handlers"] == result[name]
 
 
 class TestMainUsesPluginManager:
@@ -162,58 +131,60 @@ class TestMainUsesPluginManager:
         # Remove from cache to force fresh import inside patch context
         sys.modules.pop("bot.main", None)
 
-        with patch.object(pm_module, "PluginManager") as mock_plugin_cls:
+        class FakeSettings:
+            logfire_environment = "test"
+            database_path = ":memory:"
+            telegram_bot_token = "test"
+            groups_config_path = "nonexistent.json"
+            group_id = -100999
+            warning_topic_id = 42
+            restrict_failed_users = True
+            warning_threshold = 3
+            warning_time_threshold_minutes = 10080
+            captcha_enabled = False
+            captcha_timeout_seconds = 120
+            new_user_probation_hours = 48
+            new_user_violation_threshold = 3
+            rules_link = "https://t.me/rules"
+            contact_spam_restrict = False
+            duplicate_spam_enabled = False
+            duplicate_spam_window_seconds = 30
+            duplicate_spam_threshold = 3
+            duplicate_spam_min_length = 10
+            duplicate_spam_similarity = 0.8
+            bio_bait_enabled = True
+            bio_bait_monitor_only = False
+            bio_bait_alert_chat_id = None
+            plugins_default = {}
+            log_level = "INFO"
+            logfire_enabled = False
+            logfire_token = None
+            logfire_service_name = "pythonid-bot"
+
+        with (
+            patch.object(pm_module, "PluginManager") as mock_plugin_cls,
+            patch("bot.main.configure_logging"),
+            patch("bot.main.init_group_registry") as mock_init_reg,
+            patch("bot.main.init_database"),
+            patch("bot.main.Bot"),
+            patch("bot.main.Dispatcher"),
+            patch("bot.main.asyncio.run"),
+            patch("bot.main.get_settings", return_value=FakeSettings()),
+        ):
             mock_pm = MagicMock()
             mock_pm.register_all.return_value = {}
+            mock_pm.compute_effective_map.return_value = {}
             mock_plugin_cls.return_value = mock_pm
+            mock_reg = MagicMock()
+            mock_reg.all_groups.return_value = []
+            mock_init_reg.return_value = mock_reg
 
-            with patch("bot.main.configure_logging"):
-                with patch("bot.main.init_group_registry") as mock_init_reg:
-                    mock_reg = MagicMock()
-                    mock_reg.all_groups.return_value = []
-                    mock_init_reg.return_value = mock_reg
-                    with patch("bot.main.init_database"):
-                        with patch("bot.main.Application") as mock_app_cls:
-                            mock_app = MagicMock()
-                            mock_app.bot_data = {}
-                            mock_app_cls.builder.return_value.token.return_value.post_init.return_value.build.return_value = mock_app
+            from bot.main import main
+            main()
 
-                            class FakeSettings:
-                                logfire_environment = "test"
-                                database_path = ":memory:"
-                                telegram_bot_token = "test"
-                                groups_config_path = "nonexistent.json"
-                                group_id = -100999
-                                warning_topic_id = 42
-                                restrict_failed_users = True
-                                warning_threshold = 3
-                                warning_time_threshold_minutes = 10080
-                                captcha_enabled = False
-                                captcha_timeout_seconds = 120
-                                new_user_probation_hours = 48
-                                new_user_violation_threshold = 3
-                                rules_link = "https://t.me/rules"
-                                contact_spam_restrict = False
-                                duplicate_spam_enabled = False
-                                duplicate_spam_window_seconds = 30
-                                duplicate_spam_threshold = 3
-                                duplicate_spam_min_length = 10
-                                duplicate_spam_similarity = 0.8
-                                bio_bait_enabled = True
-                                bio_bait_monitor_only = False
-                                bio_bait_alert_chat_id = None
-                                plugins_default = {}
-                                log_level = "INFO"
-                                logfire_enabled = False
-                                logfire_token = None
-                                logfire_service_name = "pythonid-bot"
-
-                            with patch("bot.main.get_settings", return_value=FakeSettings()):
-                                from bot.main import main
-                                main()
-
-                                mock_pm.register_all.assert_called_once()
-                    mock_init_reg.assert_called_once()
+            mock_pm.register_all.assert_called_once()
+            mock_pm.compute_effective_map.assert_called_once()
+        mock_init_reg.assert_called_once()
 
 
 class TestRefactoredBuiltinModules:
@@ -331,29 +302,21 @@ class TestRefactoredBuiltinModules:
         """duplicate_spam (group=4) and bio_bait_spam (group=5) must not share a group.
 
         Regression guard for the reachability bug this test guards against: both
-        handlers match on ChatType.GROUPS & ~COMMAND, so if they shared a group
-        number PTB would run only the first-registered one (duplicate_spam, per
-        MANIFEST_ORDER) and bio_bait_spam would never fire. Both must also be
-        registered blocking so their ApplicationHandlerStop stops downstream
-        groups after enforcement — PTB swallows ApplicationHandlerStop raised
-        from non-blocking handlers.
+        handlers match on group messages, so if they shared a group number the
+        dispatcher would run only the first-registered one (duplicate_spam, per
+        MANIFEST_ORDER) and bio_bait_spam would never fire. Enforcement raises
+        StopPropagation, which halts all downstream groups in the manual dispatch.
         """
         from bot.plugins.builtin import spam
 
-        app = MagicMock()
-        app.add_handler = MagicMock()
+        state = AppState()
 
-        dup_handlers = spam.register_duplicate_spam(app)
-        bait_handlers = spam.register_bio_bait_spam(app)
+        dup_specs = spam.register_duplicate_spam(state)
+        bait_specs = spam.register_bio_bait_spam(state)
 
-        dup_group = app.add_handler.call_args_list[0].kwargs["group"]
-        bait_group = app.add_handler.call_args_list[1].kwargs["group"]
-        assert dup_group != bait_group
-
-        # Blocking = not explicitly non-blocking; PTB's default is the
-        # DEFAULT_TRUE sentinel, not the literal True.
-        assert dup_handlers[0].block is not False
-        assert bait_handlers[0].block is not False
+        assert dup_specs, "duplicate_spam registrar returned no specs"
+        assert bait_specs, "bio_bait_spam registrar returned no specs"
+        assert dup_specs[0].group != bait_specs[0].group
 
     def test_captcha_has_registrar(self):
         """bot.plugins.builtin.captcha has register_captcha function."""
@@ -393,84 +356,68 @@ class TestRefactoredBuiltinModules:
 
 
 class TestIndividualRegistrars:
-    """Individual registrar functions correctly register their handlers."""
+    """Individual registrar functions return correct handler specs."""
 
     def test_verify_registrar_adds_handler(self):
-        """register_verify adds a CommandHandler to the app."""
+        """register_verify returns a command spec for /verify."""
         from bot.plugins.builtin.commands import register_verify
 
-        app = MagicMock()
-        app.bot_data = {}
-        app.add_handler = MagicMock()
-        handlers = register_verify(app)
-        assert len(handlers) >= 1
-        app.add_handler.assert_called()
+        specs = register_verify(AppState())
+        assert len(specs) >= 1
+        assert specs[0].command == "verify"
 
     def test_topic_guard_registrar_adds_handler(self):
-        """register_topic_guard adds handler to group=-1."""
+        """register_topic_guard returns a spec in group=-1."""
         from bot.plugins.builtin.topic_guard import register_topic_guard
 
-        app = MagicMock()
-        app.bot_data = {}
-        app.add_handler = MagicMock()
-        handlers = register_topic_guard(app)
-        assert len(handlers) >= 1
-        app.add_handler.assert_called()
+        specs = register_topic_guard(AppState())
+        assert len(specs) >= 1
+        assert specs[0].group == -1
 
     def test_captcha_registrar_adds_handlers(self):
-        """register_captcha adds handlers via captcha.get_handlers()."""
+        """register_captcha returns specs via captcha.get_handlers()."""
         from bot.plugins.builtin.captcha import register_captcha
 
-        app = MagicMock()
-        app.bot_data = {}
-        app.add_handler = MagicMock()
-        handlers = register_captcha(app)
-        assert len(handlers) >= 1
-        app.add_handler.assert_called()
+        specs = register_captcha(AppState())
+        assert len(specs) >= 1
 
     def test_auto_restrict_job_registrar_schedules_job(self):
-        """register_auto_restrict_job calls job_queue.run_repeating."""
+        """register_auto_restrict_job schedules the repeating job on the scheduler."""
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
         from bot.plugins.builtin.jobs import register_auto_restrict_job
 
-        app = MagicMock()
-        app.bot_data = {}
-        job_queue = MagicMock()
-        job_queue.run_repeating = MagicMock()
-        app.job_queue = job_queue
-        register_auto_restrict_job(app)
-        app.job_queue.run_repeating.assert_called_once()
+        state = AppState(scheduler=AsyncIOScheduler())
+        specs = register_auto_restrict_job(state)
+        assert specs == []
+        assert state.scheduler.get_job("auto_restrict_job") is not None
+
+    def test_refresh_admin_ids_job_registrar_schedules_job(self):
+        """register_refresh_admin_ids_job schedules the repeating job on the scheduler."""
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+        from bot.plugins.builtin.jobs import register_refresh_admin_ids_job
+
+        state = AppState(scheduler=AsyncIOScheduler())
+        specs = register_refresh_admin_ids_job(state)
+        assert specs == []
+        assert state.scheduler.get_job("refresh_admin_ids_job") is not None
 
     def test_inline_keyboard_spam_registrar_adds_handler(self):
-        """register_inline_keyboard_spam adds handler to group=1."""
+        """register_inline_keyboard_spam returns a spec in group=1."""
         from bot.plugins.builtin.spam import register_inline_keyboard_spam
 
-        app = MagicMock()
-        app.bot_data = {}
-        app.add_handler = MagicMock()
-        handlers = register_inline_keyboard_spam(app)
-        assert len(handlers) >= 1
-        assert app.add_handler.call_count == 1
-        call_args, call_kwargs = app.add_handler.call_args
-        assert len(call_args) == 1
-        assert call_kwargs["group"] == 1
-        from telegram.ext import MessageHandler
-        assert isinstance(call_args[0], MessageHandler)
+        specs = register_inline_keyboard_spam(AppState())
+        assert len(specs) == 1
+        assert specs[0].group == 1
+        assert specs[0].update_kinds == ("message", "edited_message")
 
     def test_guest_bot_block_registrar_adds_handler(self):
-        """register_guest_bot_block adds a guest-only handler to group=0."""
-        from telegram.ext import MessageHandler
-
-        from bot.handlers.guest_bot import GuestBotFilter
+        """register_guest_bot_block returns a guest-only spec in group=0."""
+        from bot.handlers.guest_bot import guest_bot_filter
         from bot.plugins.builtin.spam import register_guest_bot_block
 
-        app = MagicMock()
-        app.bot_data = {}
-        app.add_handler = MagicMock()
-        handlers = register_guest_bot_block(app)
-        assert len(handlers) >= 1
-        assert app.add_handler.call_count == 1
-        call_args, call_kwargs = app.add_handler.call_args
-        assert len(call_args) == 1
-        assert call_kwargs["group"] == 0
-        assert isinstance(call_args[0], MessageHandler)
-        assert isinstance(call_args[0].filters, GuestBotFilter)
+        specs = register_guest_bot_block(AppState())
+        assert len(specs) == 1
+        assert specs[0].group == 0
+        assert specs[0].check is guest_bot_filter

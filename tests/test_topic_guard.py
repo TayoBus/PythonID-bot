@@ -1,8 +1,8 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram.ext import ApplicationHandlerStop
 
+from bot.dispatch import AppState, HandlerContext, StopPropagation
 from bot.group_config import GroupConfig
 from bot.handlers.topic_guard import guard_warning_topic
 
@@ -25,17 +25,16 @@ def mock_update():
     update.message.message_thread_id = 42
     update.message.delete = AsyncMock()
     update.edited_message = None
-    update.effective_chat = MagicMock()
-    update.effective_chat.id = -1001234567890
     return update
 
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = AsyncMock()
-    context.bot.id = 99999
-    return context
+    bot = MagicMock()
+    bot.get_chat_member = AsyncMock()
+    bot.id = 99999
+    state = AppState()
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 class TestGuardWarningTopic:
@@ -59,8 +58,6 @@ class TestGuardWarningTopic:
         mock_context.bot.get_chat_member.assert_not_called()
 
     async def test_wrong_group_ignored(self, mock_update, mock_context):
-        mock_update.effective_chat.id = -100999999
-
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=None):
             await guard_warning_topic(mock_update, mock_context)
 
@@ -82,7 +79,7 @@ class TestGuardWarningTopic:
         mock_update.message.from_user.id = 99999  # Same as bot id
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
         mock_context.bot.get_chat_member.assert_not_called()
@@ -96,7 +93,7 @@ class TestGuardWarningTopic:
         mock_context.bot.get_chat_member.return_value = chat_member
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
         mock_context.bot.get_chat_member.assert_called_once_with(
@@ -113,7 +110,7 @@ class TestGuardWarningTopic:
         mock_context.bot.get_chat_member.return_value = chat_member
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
         mock_update.message.delete.assert_not_called()
@@ -126,7 +123,7 @@ class TestGuardWarningTopic:
         mock_context.bot.get_chat_member.return_value = chat_member
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
         mock_update.message.delete.assert_called_once()
@@ -139,7 +136,7 @@ class TestGuardWarningTopic:
         mock_context.bot.get_chat_member.return_value = chat_member
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
         mock_update.message.delete.assert_called_once()
@@ -167,11 +164,9 @@ class TestGuardWarningTopicEditedMessage:
         update.edited_message.from_user.full_name = "Bot"
         update.edited_message.message_thread_id = 42
         update.edited_message.delete = AsyncMock()
-        update.effective_chat = MagicMock()
-        update.effective_chat.id = -1001234567890
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(update, mock_context)
 
         mock_context.bot.get_chat_member.assert_not_called()
@@ -186,15 +181,13 @@ class TestGuardWarningTopicEditedMessage:
         update.edited_message.from_user.full_name = "Admin User"
         update.edited_message.message_thread_id = 42
         update.edited_message.delete = AsyncMock()
-        update.effective_chat = MagicMock()
-        update.effective_chat.id = -1001234567890
 
         chat_member = MagicMock()
         chat_member.status = "administrator"
         mock_context.bot.get_chat_member.return_value = chat_member
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(update, mock_context)
 
         update.edited_message.delete.assert_not_called()
@@ -208,15 +201,13 @@ class TestGuardWarningTopicEditedMessage:
         update.edited_message.from_user.full_name = "Regular User"
         update.edited_message.message_thread_id = 42
         update.edited_message.delete = AsyncMock()
-        update.effective_chat = MagicMock()
-        update.effective_chat.id = -1001234567890
 
         chat_member = MagicMock()
         chat_member.status = "member"
         mock_context.bot.get_chat_member.return_value = chat_member
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(update, mock_context)
 
         update.edited_message.delete.assert_called_once()
@@ -230,7 +221,7 @@ class TestGuardWarningTopicErrorHandling:
         mock_context.bot.get_chat_member.side_effect = Exception("API error")
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
         mock_update.message.delete.assert_called_once()
@@ -245,7 +236,7 @@ class TestGuardWarningTopicErrorHandling:
         mock_update.message.delete.side_effect = Exception("delete error")
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
     async def test_error_recovery_delete_also_fails(
@@ -256,7 +247,7 @@ class TestGuardWarningTopicErrorHandling:
         mock_update.message.delete.side_effect = Exception("delete also failed")
 
         with patch("bot.handlers.topic_guard.get_group_config_for_update", return_value=group_config):
-            with pytest.raises(ApplicationHandlerStop):
+            with pytest.raises(StopPropagation):
                 await guard_warning_topic(mock_update, mock_context)
 
         mock_update.message.delete.assert_called_once()

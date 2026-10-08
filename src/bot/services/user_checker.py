@@ -8,7 +8,8 @@ a complete profile (public photo and username set).
 import logging
 from dataclasses import dataclass
 
-from telegram import Bot, User
+from aiogram import Bot
+from aiogram.types import User
 
 from bot.database.service import get_database
 

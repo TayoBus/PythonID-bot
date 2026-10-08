@@ -18,8 +18,19 @@ it is never sent to the classification API.
 import logging
 import time
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
-from telegram.ext import CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
+
+from bot.dispatch import (
+    HandlerContext,
+    HandlerSpec,
+    callback_data_pattern,
+    effective_chat,
+    effective_message,
+    effective_user,
+    has_text,
+    is_command_message,
+    is_group_chat,
+)
 
 from bot.config import get_settings
 from bot.constants import (
@@ -55,7 +66,12 @@ from bot.services.user_checker import check_user_profile
 
 logger = logging.getLogger(__name__)
 
-AI_SPAM_FILTER = filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND
+def ai_spam_filter(update: Update) -> bool:
+    """Match group text messages that are not commands."""
+    return is_group_chat(update) and has_text(update) and not is_command_message(update)
+
+
+AI_SPAM_FILTER = ai_spam_filter
 AI_SPAM_CALLBACK_PATTERN = r"^aispam:(del|delres|delban|dismiss):-?\d+:\d+:\d+$"
 
 AI_SPAM_MIN_LENGTH = 20
@@ -75,14 +91,14 @@ def build_alert_keyboard(
 ) -> InlineKeyboardMarkup:
     """Build the admin action keyboard for a suspected spam message."""
     suffix = f":{group_id}:{user_id}:{message_id}"
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(AI_SPAM_BUTTON_DELETE, callback_data=f"aispam:{ACTION_DELETE}{suffix}"),
-            InlineKeyboardButton(AI_SPAM_BUTTON_DISMISS, callback_data=f"aispam:{ACTION_DISMISS}{suffix}"),
+            InlineKeyboardButton(text=AI_SPAM_BUTTON_DELETE, callback_data=f"aispam:{ACTION_DELETE}{suffix}"),
+            InlineKeyboardButton(text=AI_SPAM_BUTTON_DISMISS, callback_data=f"aispam:{ACTION_DISMISS}{suffix}"),
         ],
         [
-            InlineKeyboardButton(AI_SPAM_BUTTON_DELETE_RESTRICT, callback_data=f"aispam:{ACTION_DELETE_RESTRICT}{suffix}"),
-            InlineKeyboardButton(AI_SPAM_BUTTON_DELETE_BAN, callback_data=f"aispam:{ACTION_DELETE_BAN}{suffix}"),
+            InlineKeyboardButton(text=AI_SPAM_BUTTON_DELETE_RESTRICT, callback_data=f"aispam:{ACTION_DELETE_RESTRICT}{suffix}"),
+            InlineKeyboardButton(text=AI_SPAM_BUTTON_DELETE_BAN, callback_data=f"aispam:{ACTION_DELETE_BAN}{suffix}"),
         ],
     ])
 
@@ -103,8 +119,8 @@ def plain_mention(user: User) -> str:
     return f"@{user.username}" if user.username else user.full_name
 
 
-def _already_alerted(context: ContextTypes.DEFAULT_TYPE, key: tuple[int, int]) -> bool:
-    alerts: dict[tuple[int, int], int] = context.bot_data.setdefault(ALERTS_KEY, {})
+def _already_alerted(context: HandlerContext, key: tuple[int, int]) -> bool:
+    alerts: dict[tuple[int, int], int] = context.state.data.setdefault(ALERTS_KEY, {})
     if len(alerts) >= ALERTS_MAX_SIZE:
         for oldest in list(alerts)[: ALERTS_MAX_SIZE // 2]:
             del alerts[oldest]
@@ -114,7 +130,7 @@ def _already_alerted(context: ContextTypes.DEFAULT_TYPE, key: tuple[int, int]) -
     return False
 
 
-def _get_group_config(context: ContextTypes.DEFAULT_TYPE, group_id: int):
+def _get_group_config(context: HandlerContext, group_id: int):
     try:
         return get_group_registry().get(group_id)
     except RuntimeError:
@@ -123,7 +139,7 @@ def _get_group_config(context: ContextTypes.DEFAULT_TYPE, group_id: int):
 
 
 async def _fetch_profile_status(
-    context: ContextTypes.DEFAULT_TYPE, user: User
+    context: HandlerContext, user: User
 ) -> str:
     """Best-effort local profile completeness note for the alert."""
     try:
@@ -165,7 +181,7 @@ def flagged_aspects(
 
 
 async def _classify_and_alert(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     group_id: int,
     user: User,
     message_id: int,
@@ -253,17 +269,20 @@ async def _classify_and_alert(
 
 
 async def handle_ai_spam_monitor(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """Last-defense entry handler: spawn a background classification."""
-    message = update.effective_message
-    user = update.effective_user
+    message = effective_message(update)
+    user = effective_user(update)
     if message is None or message.text is None or user is None or user.is_bot:
         return
     if len(message.text.strip()) < AI_SPAM_MIN_LENGTH:
         return
 
-    group_id = update.effective_chat.id
+    chat = effective_chat(update)
+    if chat is None:
+        return
+    group_id = chat.id
     if is_user_admin_or_trusted(context, group_id, user.id):
         return
     if daily_budget_exhausted(get_settings().ai_spam_daily_budget):
@@ -273,8 +292,8 @@ async def handle_ai_spam_monitor(
     ):
         return
 
-    # Application.create_task keeps a strong reference and logs exceptions.
-    context.application.create_task(
+    # create_task keeps the update pipeline non-blocking and logs exceptions.
+    context.create_task(
         _classify_and_alert(
             context,
             group_id=group_id,
@@ -282,12 +301,11 @@ async def handle_ai_spam_monitor(
             message_id=message.message_id,
             message_text=message.text,
         ),
-        update=update,
     )
 
 
 async def handle_ai_spam_action(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """Admin pressed an action button on an AI spam alert."""
     query = update.callback_query
@@ -349,16 +367,35 @@ async def handle_ai_spam_action(
         action=action_label + (f" ({'; '.join(detail_parts)})" if detail_parts else ""),
     )
     try:
-        await query.edit_message_text(
+        await query.message.edit_text(
             (query.message.text or "") + handled_text, reply_markup=None
         )
     except Exception:
         logger.warning("ai_spam_monitor: failed to mark alert handled", exc_info=True)
 
 
-def get_handlers() -> list[MessageHandler | CallbackQueryHandler]:
-    """Return the message handler and callback handler for this module."""
+def get_handlers() -> list[HandlerSpec]:
+    """Return the message handler and callback handler for this module.
+
+    The message spec runs at group=7 (last defense); the callback spec at
+    group=0. The plugin layer wraps each callback with ``guard_plugin``
+    using the spec's own ``plugin_name``.
+    """
     return [
-        MessageHandler(AI_SPAM_FILTER, handle_ai_spam_monitor),
-        CallbackQueryHandler(handle_ai_spam_action, pattern=AI_SPAM_CALLBACK_PATTERN),
+        HandlerSpec(
+            plugin_name="ai_spam_monitor",
+            group=7,
+            update_kinds=("message", "edited_message"),
+            check=AI_SPAM_FILTER,
+            callback=handle_ai_spam_monitor,
+            label="ai_spam_monitor",
+        ),
+        HandlerSpec(
+            plugin_name="ai_spam_callback",
+            group=0,
+            update_kinds=("callback_query",),
+            check=callback_data_pattern(AI_SPAM_CALLBACK_PATTERN),
+            callback=handle_ai_spam_action,
+            label="ai_spam_callback",
+        ),
     ]

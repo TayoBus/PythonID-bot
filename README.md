@@ -170,7 +170,7 @@ uv run pythonid-bot
 BOT_ENV=staging uv run pythonid-bot
 
 # Stop gracefully with Ctrl+C
-# The bot will properly shut down the JobQueue scheduler before exiting
+# The bot will properly shut down the APScheduler scheduler before exiting
 ```
 
 ## Environment Configuration
@@ -216,13 +216,13 @@ The project maintains comprehensive test coverage:
 - **Tests**: 1,075 total (includes 19 Hypothesis property tests)
 - **Pass Rate**: 100%
 - **Property tests**: `tests/test_properties.py` exercises pure functions (format helpers, URL whitelist, name formatters) with random inputs and shrinks failing cases to minimal examples
-- **Mypy**: Pragmatic config in `pyproject.toml`. Disables error codes that are noisy from PTB / SQLModel / Pydantic v2; catches real type bugs in new code
+- **Mypy**: Pragmatic config in `pyproject.toml`. Disables error codes that are noisy from aiogram / SQLModel / Pydantic v2; catches real type bugs in new code
 
 All modules are fully unit tested with:
 - Mocked async dependencies (telegram bot API calls)
 - Edge case handling (errors, empty results, boundary conditions)
 - Database initialization and schema validation
-- Background job testing (JobQueue integration, job configuration, auto-restriction logic)
+- Background job testing (APScheduler integration, job configuration, auto-restriction logic)
 - Captcha verification flow (new member handling, callback verification, timeout handling, profile photo + username check)
 - Anti-spam protection (contact cards, inline keyboards, forwarded messages, URL whitelisting, external replies)
 - Plugin registration (built-in plugins wired through `PluginManager`)
@@ -272,7 +272,7 @@ PythonID/
 │   └── test_whitelist.py
 └── src/
     └── bot/
-        ├── main.py              # Entry point with JobQueue integration + PluginManager bootstrap
+        ├── main.py              # Entry point with APScheduler + PluginManager bootstrap
         ├── config.py            # Pydantic settings
         ├── constants.py         # Shared constants
         ├── group_config.py      # Multi-group configuration (GroupConfig, GroupRegistry)
@@ -307,7 +307,7 @@ PythonID/
             ├── admin_cache.py        # Admin ID cache + refresh
             ├── bot_info.py           # Bot info caching
             ├── captcha_recovery.py   # Captcha timeout recovery
-            ├── scheduler.py          # JobQueue background job
+            ├── scheduler.py          # APScheduler background job
             ├── telegram_utils.py     # Shared telegram utilities
             └── user_checker.py       # Profile validation
 ```
@@ -323,7 +323,7 @@ flowchart TD
     RegisterHandlers --> ComputeMap[Compute Per-Group<br/>Effective Plugin Map]
     ComputeMap --> RunPolling[run_polling starts]
     RunPolling --> FetchAdmins[post_init: Fetch<br/>Group Admin IDs]
-    FetchAdmins --> LoadTrusted[(Load Trusted User IDs<br/>into bot_data cache)]
+    FetchAdmins --> LoadTrusted[(Load Trusted User IDs<br/>into the shared state cache)]
     LoadTrusted --> RecoverCaptcha{Any Group Has<br/>Captcha Enabled?}
     RecoverCaptcha -->|Yes| RecoverPending[Recover Pending Captchas]
     RecoverCaptcha -->|No| Poll[Poll for Updates]
@@ -362,20 +362,20 @@ flowchart TD
     CancelTimeout --> UpdateMessage[Edit Message: Verified]
     UpdateMessage --> EndNM3([Done])
 
-    %% ===================== Group Message Pipeline (real PTB group order) =====================
+    %% ===================== Group Message Pipeline (dispatch group order) =====================
     UpdateType -->|Group Message| G_TopicGuard{group=-1 topic_guard:<br/>In Warning Topic?}
     G_TopicGuard -->|No, or lookup error| G_GuestGate
     G_TopicGuard -->|Yes, incl. API error<br/>fail-closed| G_TopicIsBotAdmin{Sender is<br/>Bot or Admin?}
-    G_TopicIsBotAdmin -->|Yes| StopTopic1([ApplicationHandlerStop<br/>message allowed])
+    G_TopicIsBotAdmin -->|Yes| StopTopic1([StopPropagation<br/>message allowed])
     G_TopicIsBotAdmin -->|No| G_TopicDelete[Delete Message]
-    G_TopicDelete --> StopTopic2([ApplicationHandlerStop])
+    G_TopicDelete --> StopTopic2([StopPropagation])
 
     G_GuestGate{group=0 guest_bot_block:<br/>Guest Mode message?}
     G_GuestGate -->|No| G_InlineGate
     G_GuestGate -->|Yes, whitelisted| G_InlineGate
     G_GuestGate -->|Yes, not whitelisted| G_GuestDelete[Delete Message]
     G_GuestDelete --> G_GuestCaller{Human caller?<br/>Admin/Trusted?}
-    G_GuestCaller -->|Admin/Trusted or Channel-only| StopGuest([ApplicationHandlerStop])
+    G_GuestCaller -->|Admin/Trusted or Channel-only| StopGuest([StopPropagation])
     G_GuestCaller -->|Human, not exempt| G_GuestEnforce[Progressive Warning/Restriction]
     G_GuestEnforce --> StopGuest
 
@@ -386,7 +386,7 @@ flowchart TD
     G_InlineCheck -->|Yes| G_InlineDelete[Delete Message]
     G_InlineDelete --> G_InlineRestrict[Restrict User<br/>always, no config gate]
     G_InlineRestrict --> G_InlineNotify[Notify Warning Topic]
-    G_InlineNotify --> StopInline([ApplicationHandlerStop])
+    G_InlineNotify --> StopInline([StopPropagation])
 
     G_ContactGate{group=2 contact_spam:<br/>Bot or Admin/Trusted?}
     G_ContactGate -->|Yes| G_NewUserGate
@@ -397,7 +397,7 @@ flowchart TD
     G_ContactRestrictGate -->|Yes| G_ContactRestrict[Restrict User]
     G_ContactRestrict --> G_ContactNotify[Notify Warning Topic]
     G_ContactRestrictGate -->|No, delete only| G_ContactNotify
-    G_ContactNotify --> StopContact([ApplicationHandlerStop])
+    G_ContactNotify --> StopContact([StopPropagation])
 
     G_NewUserGate{group=3 new_user_spam:<br/>Bot or Admin/Trusted?}
     G_NewUserGate -->|Yes| G_Group4Note
@@ -412,13 +412,13 @@ flowchart TD
     G_ViolationDelete --> G_ViolationIncrement[(Increment Violation Count)]
     G_ViolationIncrement --> G_ViolationCount{Violation<br/>Count?}
     G_ViolationCount -->|1st| G_ViolationWarn[Send Probation Warning]
-    G_ViolationWarn --> StopNewUser1([ApplicationHandlerStop])
-    G_ViolationCount -->|2 to N-1| StopNewUser2([ApplicationHandlerStop<br/>silent, delete only])
+    G_ViolationWarn --> StopNewUser1([StopPropagation])
+    G_ViolationCount -->|2 to N-1| StopNewUser2([StopPropagation<br/>silent, delete only])
     G_ViolationCount -->|">= new_user_violation_threshold"| G_ViolationRestrict[Restrict User]
     G_ViolationRestrict --> G_ViolationNotify[Send Restriction Notice]
-    G_ViolationNotify --> StopNewUser3([ApplicationHandlerStop])
+    G_ViolationNotify --> StopNewUser3([StopPropagation])
 
-    G_Group4Note[/"group=4: two handlers share the SAME filter<br/>(GROUPS &amp; not COMMAND). duplicate_spam registers<br/>first in MANIFEST_ORDER and PTB block defaults to<br/>True, so it always claims the update -<br/>bio_bait_spam's handler never runs in practice."/]
+    G_Group4Note[/"group=4 and group=5 must never be shared:<br/>the dispatcher runs only the first matching<br/>handler per group, so duplicate_spam (group=4)<br/>would starve bio_bait_spam (group=5) if merged."/]
     G_Group4Note --> G_DupGate{duplicate_spam:<br/>Enabled, Bot,<br/>or Admin/Trusted?}
     G_DupGate -->|Disabled, bot,<br/>or admin/trusted| G_ProfileGate
     G_DupGate -->|No| G_DupLength{Message Long Enough?<br/>duplicate_spam_min_length}
@@ -428,7 +428,7 @@ flowchart TD
     G_DupSimilar -->|Yes| G_DupDelete[Delete Matching Messages<br/>in Window]
     G_DupDelete --> G_DupRestrict[Restrict User]
     G_DupRestrict --> G_DupNotify[Notify Warning Topic]
-    G_DupNotify --> StopDup([ApplicationHandlerStop])
+    G_DupNotify --> StopDup([StopPropagation])
 
     G_ProfileGate{group=5 profile_monitor:<br/>Sender is Bot?<br/>no admin bypass here}
     G_ProfileGate -->|Yes| EndG0([Ignore])
@@ -474,7 +474,7 @@ flowchart TD
     DM_Result -->|Yes, at least one| DM_Success[Send: Success Message]
     DM_Result -->|No, all already clear| DM_AlreadyDone[Send: Already Unrestricted]
 
-    %% ===================== Scheduler Jobs (JobQueue, group=6, background) =====================
+    %% ===================== Scheduler Jobs (APScheduler, background) =====================
     ComputeMap -.->|Every 5 min| SchedulerJob[auto_restrict_job]
     SchedulerJob --> QueryDB[(Query Warnings Past<br/>Time Threshold, All Groups)]
     QueryDB --> HasExpired{Expired<br/>Warnings?}
@@ -588,7 +588,7 @@ flowchart TD
 
 The bot is organized into clear modules for maintainability:
 
-- **main.py**: Entry point with python-telegram-bot's JobQueue integration, plugin manager bootstrap, admin cache refresh, and graceful shutdown
+- **main.py**: Entry point with aiogram's Bot + Dispatcher, APScheduler integration, plugin manager bootstrap, admin cache refresh, and graceful shutdown
 - **plugins/**: Modular plugin system. `PluginManager` discovers built-in plugins in `src/bot/plugins/builtin/`, each wrapping a handler module with per-group runtime gating via `guard_plugin("name")`. Add a new plugin by dropping a file in `builtin/`
 - **handlers/**: Message processing logic (priority groups -1 through 4). Plugin wrappers transparently apply `guard_plugin`, so changes to handler internals flow through without plugin updates
   - `topic_guard.py`: Protects warning topic (group=-1, messages + edited messages, fail-closed)
@@ -604,7 +604,7 @@ The bot is organized into clear modules for maintainability:
   - `trust.py`: /trust, /untrust, /trusted admin commands (TrustedUser table caches names at trust time so /trusted renders without API calls)
   - `warn.py`: Per-group admin /warn messages by reply or member ID, routed to the configured moderation topic without database enforcement records
 - **services/**: Business logic and utilities
-  - `scheduler.py`: JobQueue background job that runs every 5 minutes for time-based auto-restrictions
+  - `scheduler.py`: APScheduler background job that runs every 5 minutes for time-based auto-restrictions
   - `user_checker.py`: Profile validation (photo + username check) — used by both the captcha gate and the per-message monitor
   - `bot_info.py`: Caches bot metadata to avoid repeated API calls
   - `telegram_utils.py`: Shared telegram utilities (user status checks, etc.)
@@ -652,7 +652,7 @@ Users are restricted when **either**:
 Whichever happens first triggers the restriction.
 
 ### Time-Based Auto-Restriction
-The bot runs a JobQueue background job every 5 minutes that:
+The bot runs an APScheduler background job every 5 minutes that:
 1. Queries the database for warnings older than `WARNING_TIME_THRESHOLD_MINUTES`
 2. Restricts those users (applies mute permissions)
 3. Sends notifications to the warning topic with the DM link
@@ -661,7 +661,7 @@ The bot runs a JobQueue background job every 5 minutes that:
 This ensures users cannot evade restrictions by simply not sending messages.
 
 ### Admin Cache Refresh
-Admin IDs are fetched at startup and refreshed every 10 minutes via a JobQueue job. If the refresh fails for a group, the bot falls back to the previously cached data (never an empty list). Spam handlers use the cached admin IDs for fast lookups, while the topic guard uses live `get_chat_member` API calls for maximum accuracy.
+Admin IDs are fetched at startup and refreshed every 10 minutes via an APScheduler job. If the refresh fails for a group, the bot falls back to the previously cached data (never an empty list). Spam handlers use the cached admin IDs for fast lookups, while the topic guard uses live `get_chat_member` API calls for maximum accuracy.
 
 ### Message Templates and Constants
 All warning and restriction messages are centralized in `constants.py` for consistency:
@@ -676,7 +676,7 @@ All messages are formatted with proper Indonesian language patterns and include 
 ### Warning Topic Protection
 - Only group administrators and the bot itself can post in the warning topic
 - Messages and edited messages from regular users are automatically deleted
-- Uses `ApplicationHandlerStop` to prevent downstream handlers from processing warning-topic traffic
+- Uses `StopPropagation` to prevent downstream handlers from processing warning-topic traffic
 - **Fail-closed**: On API errors, messages in the warning topic are deleted (erring on the side of protection)
 
 ### Guest Bot Moderation
@@ -774,16 +774,16 @@ Both message-based and time-based restrictions work together. Users are restrict
 ### Time-based restriction not working
 - Ensure `RESTRICT_FAILED_USERS=true` is set (or time-based restrictions are always active)
 - Check that `WARNING_TIME_THRESHOLD_MINUTES` is set correctly
-- The JobQueue job runs every 5 minutes; initial restriction may take up to 5 minutes
+- The scheduler job runs every 5 minutes; initial restriction may take up to 5 minutes
 - For testing, set `WARNING_TIME_THRESHOLD_MINUTES=5` to test with 5-minute timeout
 - Check bot logs for scheduler errors
 
 ### Graceful Shutdown
-- The bot uses python-telegram-bot's built-in graceful shutdown handling
+- The bot uses aiogram's startup/shutdown handlers for graceful shutdown
 - When you press **Ctrl+C** or the process receives a termination signal:
   1. Polling stops accepting new updates
-  2. JobQueue shuts down and waits for all background jobs to complete
-  3. Application exits cleanly
+  2. The APScheduler scheduler shuts down, waiting for running jobs to complete
+  3. The dispatcher stops polling and exits cleanly
 
 **Docker deployment tip**: Docker will send SIGTERM to the bot, triggering graceful shutdown. The bot will clean up within the default timeout (10 seconds).
 

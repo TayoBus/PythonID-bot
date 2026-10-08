@@ -12,30 +12,34 @@ for fine-grained plugin registration.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
-from telegram.ext import MessageHandler, filters
-
+from bot.dispatch import (
+    AppState,
+    HandlerSpec,
+    is_command_message,
+    is_group_chat,
+)
 from bot.handlers.message import handle_message
 from bot.plugins.config import guard_plugin
-
-if TYPE_CHECKING:
-    from telegram.ext import Application, BaseHandler
 
 logger = logging.getLogger(__name__)
 
 # --- Individual registrar function ---
 
-def register_profile_monitor(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
-    """Register profile monitor handler onto application (group=6).
+def register_profile_monitor(state: AppState) -> list[HandlerSpec]:
+    """Register profile monitor handler spec (group=6).
 
     The callback is wrapped with ``guard_plugin("profile_monitor")`` for
     runtime per-group enable/disable gating.
     """
-    handler: BaseHandler = MessageHandler(
-        filters.ChatType.GROUPS & ~filters.COMMAND,
-        guard_plugin("profile_monitor")(handle_message),
+    _ = state
+    spec = HandlerSpec(
+        plugin_name="profile_monitor",
+        group=6,
+        update_kinds=("message", "edited_message"),
+        check=lambda update: is_group_chat(update) and not is_command_message(update),
+        callback=guard_plugin("profile_monitor")(handle_message),
+        label="message_handler",
     )
-    application.add_handler(handler, group=6)
     logger.info("Registered handler: message_handler (group=6)")
-    return [handler]
+    return [spec]

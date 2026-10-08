@@ -13,9 +13,11 @@ broadcast to all groups — each action is scoped to one group.
 
 import logging
 
-from telegram import Bot, Update
-from telegram.error import TelegramError
-from telegram.ext import ContextTypes
+from aiogram import Bot
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import Update
+
+from bot.dispatch import HandlerContext
 
 from bot.constants import (
     UNRESTRICT_FAILED_MESSAGE,
@@ -35,6 +37,7 @@ from bot.database.service import DatabaseService, get_database
 from bot.group_config import GroupRegistry, get_group_registry
 from bot.services.restriction_lock import restriction_lock
 from bot.services.telegram_utils import (
+    edit_callback_message,
     get_user_mention,
     is_user_admin_in_group,
     require_admin_dm_target,
@@ -98,7 +101,7 @@ async def verify_user_in_group(
                 logger.info(
                     f"Unrestricted user {target_user_id} in group {group_id} during verification"
                 )
-            except (TelegramError, RuntimeError) as e:
+            except (TelegramAPIError, RuntimeError) as e:
                 logger.info(
                     f"Could not unrestrict user {target_user_id} in group {group_id}: {e}"
                 )
@@ -211,7 +214,7 @@ async def unrestrict_user_in_group(
 
 
 async def handle_verify_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle /verify command to whitelist users for profile picture verification.
@@ -273,14 +276,14 @@ async def handle_verify_command(
             )
     except Exception as e:
         logger.error(f"Error during /verify command: {e}", exc_info=True)
-        await update.message.reply_text(VERIFY_COMMAND_ERROR_MESSAGE)
+        await update.message.reply(VERIFY_COMMAND_ERROR_MESSAGE)
         return
 
-    await update.message.reply_text(message)
+    await update.message.reply(message)
 
 
 async def handle_unverify_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle /unverify command to remove users from photo verification whitelist.
@@ -305,20 +308,20 @@ async def handle_unverify_command(
             f"User {target_user_id} is not in the photo verification whitelist.",
             exc_info=True,
         )
-        await update.message.reply_text(
+        await update.message.reply(
             UNVERIFY_NOT_WHITELISTED_MESSAGE.format(target_user_id=target_user_id)
         )
         return
     except Exception as e:
         logger.error(f"Error during /unverify command: {e}", exc_info=True)
-        await update.message.reply_text(UNVERIFY_COMMAND_ERROR_MESSAGE)
+        await update.message.reply(UNVERIFY_COMMAND_ERROR_MESSAGE)
         return
 
-    await update.message.reply_text(message)
+    await update.message.reply(message)
 
 
 async def handle_verify_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle callback query for verify button (group-scoped).
@@ -336,12 +339,12 @@ async def handle_verify_callback(
         group_id = int(parts[1])
         target_user_id = int(parts[2])
     except (IndexError, ValueError):
-        await query.edit_message_text("❌ Data callback tidak valid.")
+        await edit_callback_message(query, "❌ Data callback tidak valid.")
         return
 
     admin_user_id = query.from_user.id
     if not is_user_admin_in_group(context, group_id, admin_user_id):
-        await query.edit_message_text("❌ Kamu bukan admin di grup ini.")
+        await edit_callback_message(query, "❌ Kamu bukan admin di grup ini.")
         return
 
     db = get_database()
@@ -351,22 +354,22 @@ async def handle_verify_callback(
         message = await verify_user_in_group(
             context.bot, db, registry, target_user_id, admin_user_id, group_id
         )
-        await query.edit_message_text(message, parse_mode="Markdown")
+        await edit_callback_message(query, message, parse_mode="Markdown")
         logger.info(
             f"Admin {admin_user_id} ({query.from_user.full_name}) "
             f"verified user {target_user_id} in group {group_id} via callback"
         )
     except ValueError:
-        await query.edit_message_text(
+        await edit_callback_message(query, 
             f"ℹ️ User dengan ID {target_user_id} sudah ada di whitelist."
         )
     except Exception as e:
-        await query.edit_message_text(f"❌ Terjadi kesalahan: {e}")
+        await edit_callback_message(query, f"❌ Terjadi kesalahan: {e}")
         logger.error(f"Error during verify callback: {e}", exc_info=True)
 
 
 async def handle_unverify_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle callback query for unverify button (group-scoped).
@@ -384,34 +387,34 @@ async def handle_unverify_callback(
         group_id = int(parts[1])
         target_user_id = int(parts[2])
     except (IndexError, ValueError):
-        await query.edit_message_text("❌ Data callback tidak valid.")
+        await edit_callback_message(query, "❌ Data callback tidak valid.")
         return
 
     admin_user_id = query.from_user.id
     if not is_user_admin_in_group(context, group_id, admin_user_id):
-        await query.edit_message_text("❌ Kamu bukan admin di grup ini.")
+        await edit_callback_message(query, "❌ Kamu bukan admin di grup ini.")
         return
 
     db = get_database()
 
     try:
         message = await unverify_user(db, target_user_id)
-        await query.edit_message_text(message)
+        await edit_callback_message(query, message)
         logger.info(
             f"Admin {admin_user_id} ({query.from_user.full_name}) "
             f"unverified user {target_user_id} via callback"
         )
     except ValueError:
-        await query.edit_message_text(
+        await edit_callback_message(query, 
             f"ℹ️ User dengan ID {target_user_id} tidak ada di whitelist."
         )
     except Exception as e:
-        await query.edit_message_text(f"❌ Terjadi kesalahan: {e}")
+        await edit_callback_message(query, f"❌ Terjadi kesalahan: {e}")
         logger.error(f"Error during unverify callback: {e}", exc_info=True)
 
 
 async def handle_unrestrict_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle callback query for unrestrict button (group-scoped).
@@ -431,12 +434,12 @@ async def handle_unrestrict_callback(
         group_id = int(parts[1])
         target_user_id = int(parts[2])
     except (IndexError, ValueError):
-        await query.edit_message_text("❌ Data callback tidak valid.")
+        await edit_callback_message(query, "❌ Data callback tidak valid.")
         return
 
     admin_user_id = query.from_user.id
     if not is_user_admin_in_group(context, group_id, admin_user_id):
-        await query.edit_message_text("❌ Kamu bukan admin di grup ini.")
+        await edit_callback_message(query, "❌ Kamu bukan admin di grup ini.")
         return
 
     db = get_database()
@@ -445,10 +448,10 @@ async def handle_unrestrict_callback(
         message = await unrestrict_user_in_group(
             context.bot, db, target_user_id, group_id
         )
-        await query.edit_message_text(message, parse_mode="Markdown")
+        await edit_callback_message(query, message, parse_mode="Markdown")
         logger.info(
             f"Admin {admin_user_id} unrestricting user {target_user_id} in group {group_id} via callback"
         )
     except Exception as e:
-        await query.edit_message_text(f"❌ Terjadi kesalahan: {e}")
+        await edit_callback_message(query, f"❌ Terjadi kesalahan: {e}")
         logger.error(f"Error during unrestrict callback: {e}", exc_info=True)

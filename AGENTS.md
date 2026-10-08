@@ -2,7 +2,7 @@
 
 ## Overview
 
-Indonesian Telegram bot for multi-group profile enforcement (photo + username), captcha verification, and anti-spam protection. Built with python-telegram-bot v20+, SQLModel, Pydantic, and Logfire.
+Indonesian Telegram bot for multi-group profile enforcement (photo + username), captcha verification, and anti-spam protection. Built with aiogram 3.x, APScheduler, SQLModel, Pydantic, and Logfire.
 
 ## Commands
 
@@ -76,7 +76,7 @@ PythonID/
 │   │   └── ai_spam_monitor.py # classifier.dev AI spam monitoring (last defense, admin-chat alerts)
 │   ├── services/
 │   │   ├── user_checker.py      # Profile validation (photo + username)
-│   │   ├── scheduler.py         # JobQueue auto-restriction (every 5 min)
+│   │   ├── scheduler.py         # APScheduler auto-restriction (every 5 min)
 │   │   ├── telegram_utils.py    # Shared API helpers
 │   │   ├── bot_info.py          # Bot metadata cache (singleton)
 │   │   ├── captcha_recovery.py  # Restart recovery for pending captchas
@@ -140,9 +140,9 @@ PythonID/
 ### Modular Plugin System
 - Built-in plugins live in `src/bot/plugins/builtin/`, one per handler domain (captcha, spam, topic_guard, profile_monitor, commands, dm, jobs)
 - `plugins/definitions.py` holds `MANIFEST_ORDER` — a static, hand-maintained tuple of 30 plugin names (topic_guard first, ai_spam_monitor last) that is the single source of truth for registration order and for the group number each plugin runs in
-- `PluginManager.register_all()` (called from `main.py:main`, not `post_init`) walks `MANIFEST_ORDER` against a static `_REGISTRY` dict (name → registrar function) and stores results in `application.bot_data["plugin_handlers"]`
+- `PluginManager.register_all(state)` (called from `main.py:main`) walks `MANIFEST_ORDER` against a static `_REGISTRY` dict (name → registrar function) and stores results in `state.plugin_handlers`
 - The plugin wrapper pattern: `bot.plugins.builtin.X` imports from `bot.handlers.X`, clones the handler list, and applies `guard_plugin("X")` for per-group runtime gating
-- To add a new plugin: add a `register_*(application) -> list[BaseHandler]` function in `builtin/`, add its name + group to `_PLUGIN_DEFINITIONS` in `definitions.py`, wire it into `_REGISTRY` in `manager.py`
+- To add a new plugin: add a `register_*(state) -> list[HandlerSpec]` function in `builtin/`, add its name + group to `_PLUGIN_DEFINITIONS` in `definitions.py`, wire it into `_REGISTRY` in `manager.py`
 - Handler modules stay decoupled from plugin internals — changes to `bot/handlers/X.py` flow through transparently
 - **Callback data format**: All admin action callbacks encode `group_id` for per-group authorization: `action:{group_id}:{user_id}[:missing_code]`. The captcha callback uses `captcha_verify_{group_id}_{user_id}`. Callback handlers verify the caller is an admin of the specific group via `is_user_admin_in_group()`
 - **Trust does not unrestrict**: Adding a user to the trusted list only clears probation — it does NOT lift restrictions. Use the separate "Buka pembatasan bot" (unrestrict) action to lift bot-applied restrictions. This prevents trust from inadvertently lifting manual admin restrictions
@@ -150,7 +150,9 @@ PythonID/
 
 ### Handler Priority Groups
 ```python
-# Registration order comes from MANIFEST_ORDER (plugins/definitions.py), not main.py directly
+# Registration order comes from MANIFEST_ORDER (plugins/definitions.py), not main.py directly.
+# The manual dispatch loop in bot/dispatch.py preserves PTB group semantics:
+# ascending group order, first-match-wins per group, StopPropagation halts all later groups.
 group=-1  # topic_guard: Runs FIRST
 group=0   # commands (including warn_command), callbacks, captcha, dm, guest_bot_block (19 plugins; only guest_bot_block is order-sensitive, via ApplicationHandlerStop)
 group=1   # inline_keyboard_spam: Catches inline keyboard URL spam
@@ -158,16 +160,16 @@ group=2   # contact_spam: Blocks contact card sharing
 group=3   # new_user_spam: Probation enforcement (links/forwards)
 group=4   # duplicate_spam: Repeated message/text/media detection
 group=5   # bio_bait_spam: Bio-bait detection (own group — sharing group 4 with duplicate_spam made it unreachable)
-group=6   # profile_monitor: Profile compliance check + JobQueue jobs (auto_restrict, refresh_admin_ids)
+group=6   # profile_monitor: Profile compliance check (APScheduler jobs: auto_restrict, refresh_admin_ids)
 group=7   # ai_spam_monitor: Runs LAST, classifier.dev AI spam monitoring (last defense — only sees messages that survived all other groups)
 ```
 
 ### Plugin Gating (`guard_plugin`)
-- `guard_plugin("name")` (`plugins/config.py`) wraps a handler callback; on each update it looks up `context.bot_data["plugin_effective_map"][group_id]["name"]` and no-ops the callback if disabled
+- `guard_plugin("name")` (`plugins/config.py`) wraps a handler callback; on each update it looks up `context.state.plugin_effective_map[group_id]["name"]` and no-ops the callback if disabled
 - Only gates **group/supergroup** chats — private and channel updates always pass through unchanged
 - Fail-open by design: unknown group, missing plugin key, or missing effective map all resolve to enabled
 - Per-group toggle resolution (`resolve_plugin_toggles`), first match wins: (1) `GroupConfig.plugins` override in groups.json, (2) `Settings.plugins_default` (`PLUGINS_DEFAULT` env, JSON object), (3) `True`
-- `PluginManager.compute_effective_map()` runs once at startup (after `register_all`) and caches the resolved per-group map in `bot_data["plugin_effective_map"]` — it is not recomputed per-update
+- `PluginManager.compute_effective_map()` runs once at startup (after `register_all`) and caches the resolved per-group map in `state.plugin_effective_map` — it is not recomputed per-update
 - There is no bypass mechanism for admin commands beyond simply not wrapping them in `guard_plugin`
 
 ### Captcha Profile Check
@@ -183,8 +185,8 @@ group=7   # ai_spam_monitor: Runs LAST, classifier.dev AI spam monitoring (last 
 - Admins and trusted users are exempt (`is_user_admin_or_trusted`)
 
 ### Guest Bot Moderation
-- `handlers/guest_bot.py` blocks Telegram **Guest Mode** messages — messages posted by a bot on behalf of a user/channel via the `@` mention feature that Telegram routes through `message.guest_bot_caller_user` / `message.guest_bot_caller_chat` (PTB v22.8+)
-- A custom `GuestBotFilter` (`filters.MessageFilter`) matches only messages where either guest-bot caller field is set, so the handler only fires on actual Guest Mode updates and raises `ApplicationHandlerStop` to stop the spam handlers at groups 1-5 from also processing the message
+- `handlers/guest_bot.py` blocks Telegram **Guest Mode** messages — messages posted by a bot on behalf of a user/channel via the `@` mention feature that Telegram routes through `message.guest_bot_caller_user` / `message.guest_bot_caller_chat` (Bot API 10.1, exposed natively by aiogram 3.29+)
+- A `guest_bot_filter` predicate matches only messages where either guest-bot caller field is set, so the handler only fires on actual Guest Mode updates and raises `StopPropagation` to stop the spam handlers at groups 1-5 from also processing the message
 - Registered as `guest_bot_block` at `handler_group=0` (alongside commands/callbacks/captcha/dm) via `spam_mod.register_guest_bot_block` in `plugins/builtin/spam.py`, gated by `guard_plugin("guest_bot_block")`
 - Non-whitelisted guest bot messages are always deleted; the invoking **human caller** then receives progressive enforcement using the group's existing `warning_threshold`:
   - 1st violation → warning in the warning topic (`GUEST_BOT_WARNING`)
@@ -202,19 +204,19 @@ group=7   # ai_spam_monitor: Runs LAST, classifier.dev AI spam monitoring (last 
 
 ### AI Spam Monitoring (classifier.dev)
 - `handlers/ai_spam_monitor.py` sends message text (monitor-only, never auto-enforces) to the free classifier.dev zero-shot API (`services/classifier_client.py`) and reports high-confidence flags to the per-group `ai_spam_alert_chat_id` (private admin group or DM) with inline buttons: delete, delete+restrict, delete+ban, dismiss
-- Registered as two plugins: `ai_spam_monitor` (message handler, group=7 — the last defense; because every enforcement handler raises `ApplicationHandlerStop`, it only classifies messages that survived all other groups) and `ai_spam_callback` (group=0, admin action buttons, authorized via `is_user_admin_in_group` on the target group)
-- Classification runs in a background task via `context.application.create_task` — the update pipeline never awaits the network; timeouts, HTTP errors, and malformed responses all fail soft
+- Registered as two plugins: `ai_spam_monitor` (message handler, group=7 — the last defense; because every enforcement handler raises `StopPropagation`, it only classifies messages that survived all other groups) and `ai_spam_callback` (group=0, admin action buttons, authorized via `is_user_admin_in_group` on the target group)
+- Classification runs in a background task via `context.create_task` — the update pipeline never awaits the network; timeouts, HTTP errors, and malformed responses all fail soft
 - One multi-label classification (`multi=True, max_labels=6`) covers six moderation aspects in a single call: `spam` (unsolicited promos/ads, paid-DM solicitations, illegal data-broker services), `scam` (fraud: fake giveaways, fake investment/crypto offers, phishing, unrealistic profit promises), `hostile` (insults/attacks, threats, harassment), `trolling` (deliberate bait/provocation, derailment), `explicit` (sexual/pornographic content), `doxxing` (sharing someone else's personal data without consent: phone numbers, addresses, ID photos), plus a `benign` negative anchor. Still 1 classification of daily budget per message. `AI_SPAM_LABELS`/`AI_SPAM_INSTRUCTIONS` in `constants.py` define the labels and the Indonesian per-aspect criteria
 - `flagged_aspects(result, threshold, valid_labels)` (handlers module, pure) returns every requested non-benign label scoring >= `ai_spam_alert_threshold` (default 0.9), highest score first; the benign anchor and any unexpected API label never flag. The same threshold applies to all aspects — no per-aspect knobs yet. If the upstream ignores `multi` and answers in single-label shape, the client falls back to the single-label parser instead of going dark
-- Circuit breaker (3 consecutive failures → 10 min cooldown; requests resume after the cooldown and a success closes the breaker) and a daily budget (default 15,000, reset at midnight WIB) stop a dead or rate-limited upstream from being hammered; both live in `classifier_client.py` and are covered by Hypothesis property tests; the shared httpx client is closed by `main.post_shutdown`
+- Circuit breaker (3 consecutive failures → 10 min cooldown; requests resume after the cooldown and a success closes the breaker) and a daily budget (default 15,000, reset at midnight WIB) stop a dead or rate-limited upstream from being hammered; both live in `classifier_client.py` and are covered by Hypothesis property tests; the shared httpx client is closed by the `dp.shutdown` handler in `main.py`
 - Profile metadata (photo/username via `check_user_profile`) is fetched locally for alert enrichment only — it is never sent to the classifier API; the API gets text + fixed Indonesian `instructions` criteria only
 - Alert presents sender mention, matched reasons (`Alasan: spam (97%), hostile (81%)`), model, profile status, and truncated message; admin clicks edit the alert in place (`✔ Ditangani oleh <admin>`) as the audit trail; one alert per `(group_id, message_id)` with bounded dedup map
-- No `UserWarning` DB record is created — admin-confirmed restrictions are not DM-self-service-reversible (same as duplicate_spam); no `ApplicationHandlerStop` is raised
+- No `UserWarning` DB record is created — admin-confirmed restrictions are not DM-self-service-reversible (same as duplicate_spam); no `StopPropagation` is raised
 - Per-group kill switch: `"plugins": {"ai_spam_monitor": false}` / `"plugins": {"ai_spam_callback": false}` in groups.json; no alert chat configured → logfire-only monitoring
 
 ### Topic Guard Design
 - Handles both `message` and `edited_message` updates (combined filter)
-- Raises `ApplicationHandlerStop` after handling ANY warning-topic message (allows or deletes)
+- Raises `StopPropagation` after handling ANY warning-topic message (allows or deletes)
 - This prevents downstream spam/profile handlers from processing warning-topic traffic
 - **Fail-closed**: On `get_chat_member` API error, deletes the message (scoped to confirmed warning-topic only)
 - Early returns (no message, wrong group, wrong topic) happen OUTSIDE the try/except block
@@ -225,12 +227,12 @@ group=7   # ai_spam_monitor: Runs LAST, classifier.dev AI spam monitoring (last 
 - `BotInfoCache` — Class-level cache for bot username/ID
 
 ### Admin Cache
-- `post_init()` order: `preload_admin_ids()` (fail-soft per group) → load all `TrustedUser` IDs into `bot_data["trusted_user_ids"]` → conditionally `recover_pending_captchas()` if any group has `captcha_enabled`
-- Admin IDs stored in `bot_data["group_admin_ids"]` (per-group) and `bot_data["admin_ids"]` (union)
-- Refreshed every 10 minutes via `refresh_admin_ids_job` JobQueue job
+- `on_startup()` order: `preload_admin_ids()` (fail-soft per group) → load all `TrustedUser` IDs into `state.trusted_user_ids` → conditionally `recover_pending_captchas()` if any group has `captcha_enabled`
+- Admin IDs stored in `state.group_admin_ids` (per-group) and `state.admin_ids` (union)
+- Refreshed every 10 minutes via the `refresh_admin_ids_job` APScheduler job
 - On refresh failure for a group, falls back to existing cached data (not empty list)
 - Spam handlers use cached admin IDs; topic_guard uses live `get_chat_member` API call
-- Handler + JobQueue registration (`PluginManager.register_all()`) and effective-plugin-map computation happen later, in `main()` after `post_init` is wired up but before `run_polling` — not inside `post_init` itself
+- Handler + job registration (`PluginManager.register_all(state)`) and effective-plugin-map computation happen in `main()` before `dp.start_polling` — not inside the startup handler itself
 
 ### Multi-Group Support
 - `GroupConfig` — Pydantic model with 23 per-group settings: warning thresholds, captcha, probation, contact/duplicate/bio-bait spam tuning, `rules_link`, optional `moderation_topic_id`, `guest_bot_whitelist`, optional `ai_spam_alert_chat_id`, and a `plugins: dict[str, bool] | None` override
@@ -261,9 +263,9 @@ Time threshold → Auto-restrict via scheduler (parallel path)
 - **Python 3.11+** with type hints
 - **Imports**: stdlib → third-party → local
 - **Async/await**: All handlers are async
-- **PTB v20+**: Use `ContextTypes.DEFAULT_TYPE`, not legacy Dispatcher
+- **aiogram 3.x**: Handlers are `async (update: Update, context: HandlerContext)`; updates flow through the manual group-ordered dispatch loop in `bot/dispatch.py` (`AppState` carries shared state, injected via `dp.start_polling(..., state=state)`)
 - **Logging**: Use `logfire` via stdlib `logging.getLogger(__name__)`
-- **Error handling**: Catch specific exceptions (`TimedOut`), log, return gracefully
+- **Error handling**: Catch specific exceptions (`TelegramNetworkError`), log, return gracefully
 - **No inline comments** unless code is complex
 - **Docstrings**: Module-level required; function docstrings for public APIs
 
@@ -298,8 +300,7 @@ Time threshold → Auto-restrict via scheduler (parallel path)
 
 ### Admin Authorization
 ```python
-admin_ids = context.bot_data.get("admin_ids", [])
-if user.id not in admin_ids:
+if user.id not in context.state.admin_ids:
     return  # or send "Admin only" message
 ```
 
@@ -309,22 +310,22 @@ if user.id not in admin_ids:
 - `WHITELISTED_TELEGRAM_PATHS` — Indonesian tech communities (lowercase)
 
 ### Restart Recovery
-- Pending captchas persisted to DB, recovered in `post_init()`
-- JobQueue timeouts re-scheduled on bot startup
+- Pending captchas persisted to DB, recovered in `on_startup()`
+- Scheduler timeouts re-scheduled on bot startup
 
 ## CI/CD
 
 - **GitHub Actions**: `.github/workflows/python-checks.yml`
 - **Matrix**: Python 3.11, 3.12, 3.13, 3.14
 - **Steps**: ruff → mypy → pytest (lint job always; test job runs when Python files changed)
-- **Mypy config**: Pragmatic, in `pyproject.toml [tool.mypy]`. Disables noisy error codes from PTB / SQLModel / Pydantic v2 (`arg-type`, `attr-defined`, `index`, `union-attr`, `misc`, `return-value`, `call-arg`). New code should remain free of these errors
+- **Mypy config**: Pragmatic, in `pyproject.toml [tool.mypy]`. Disables noisy error codes from aiogram / SQLModel / Pydantic v2 (`arg-type`, `attr-defined`, `index`, `union-attr`, `misc`, `return-value`, `call-arg`). New code should remain free of these errors
 - **Docker**: Multi-stage build with `uv`, non-root user, 512MB limit
 
 ## Where to Look (Plugin System)
 
 | Task | Location |
 |------|----------|
-| Add a new built-in plugin | `src/bot/plugins/builtin/X.py` (class with `name` + `register(application)`) |
+| Add a new built-in plugin | `src/bot/plugins/builtin/X.py` (`register_*(state) -> list[HandlerSpec]`) |
 | Register an existing handler as a plugin | Wrap `bot.handlers.X.get_handlers()` in `bot/plugins/builtin/X.py` |
 | Add per-group runtime gating | `guard_plugin("X")` decorator in `src/bot/plugins/config.py` |
 | Disable a plugin for one group | Set `plugins: {"name": false}` in that group's entry in groups.json (`GroupConfig.plugins`) |
@@ -334,14 +335,14 @@ if user.id not in admin_ids:
 ## Notes
 
 - Registration order for all 30 built-in plugins lives in `MANIFEST_ORDER` (`plugins/definitions.py`), not scattered across `main.py`
-- `duplicate_spam` runs at `group=4` and `bio_bait_spam` at `group=5` — never share a group number between same-filter handlers (PTB runs at most one handler per group, first match wins); `auto_restrict_job` / `refresh_admin_ids_job` run as JobQueue jobs tagged `group=6` (not a PTB handler group)
+- `duplicate_spam` runs at `group=4` and `bio_bait_spam` at `group=5` — never share a group number between same-filter handlers (the dispatcher runs at most one handler per group, first match wins); `auto_restrict_job` / `refresh_admin_ids_job` run as APScheduler jobs (not dispatch groups)
 - `duplicate_spam` also covers media-only messages (photo, sticker, video, animation, document, audio, voice, video_note) via Telegram's `file_unique_id`, compared by exact match — never through the fuzzy text-similarity path; the `min_length` gate does not apply to media keys; short texts carrying a non-whitelisted URL bypass the `min_length` gate
 - Topic guard runs at `group=-1` to intercept unauthorized messages BEFORE other handlers
 - Topic guard handles both messages and edited messages, raises `ApplicationHandlerStop` to block downstream handlers
-- JobQueue auto-restriction job runs every 5 minutes (first run after 5 min delay)
-- JobQueue admin refresh job runs every 10 minutes (first run after 10 min delay)
+- APScheduler auto-restriction job runs every 5 minutes (first run after 5 min delay)
+- APScheduler admin refresh job runs every 10 minutes (first run after 10 min delay)
 - Bot uses `allowed_updates=["message", "edited_message", "callback_query", "chat_member"]`
-- Captcha uses both `ChatMemberHandler` (for "Hide Join" groups) and `MessageHandler` fallback
+- Captcha uses both `chat_member` updates (for "Hide Join" groups) and new-chat-member message fallback
 - Multi-group: handlers use `get_group_config_for_update()` instead of `settings.group_id`
 - Captcha callback data encodes group_id: `captcha_verify_{group_id}_{user_id}` to avoid ambiguity
 - Scheduler iterates all groups with per-group exception isolation

@@ -2,7 +2,7 @@ import logging
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlmodel import Session, text
@@ -49,12 +49,12 @@ def mock_bot():
 
 
 @pytest.fixture
-def mock_application(mock_bot):
-    app = MagicMock()
-    app.bot = mock_bot
-    app.job_queue = MagicMock()
-    app.job_queue.run_once = MagicMock()
-    return app
+def mock_state(mock_bot):
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from bot.dispatch import AppState
+
+    return AppState(bot=mock_bot, scheduler=AsyncIOScheduler())
 
 
 class TestHandleCaptchaExpiration:
@@ -147,17 +147,17 @@ class TestHandleCaptchaExpiration:
 
 class TestRecoverPendingCaptchas:
     async def test_recover_pending_captchas_no_records(
-        self, mock_application, mock_registry, temp_db, caplog
+        self, mock_state, mock_registry, temp_db, caplog
     ):
         caplog.set_level(logging.INFO)
         with patch("bot.services.captcha_recovery.get_group_registry", return_value=mock_registry):
-            await recover_pending_captchas(mock_application)
+            await recover_pending_captchas(mock_state)
 
         assert "No pending captcha verifications to recover" in caplog.text
-        mock_application.job_queue.run_once.assert_not_called()
+        assert mock_state.scheduler.get_jobs() == []
 
     async def test_recover_pending_captchas_expired_timeout(
-        self, mock_application, mock_registry, temp_db, caplog
+        self, mock_state, mock_registry, temp_db, caplog
     ):
         caplog.set_level(logging.INFO)
         db = get_database()
@@ -185,10 +185,10 @@ class TestRecoverPendingCaptchas:
             patch("bot.services.captcha_recovery.handle_captcha_expiration") as mock_expire,
         ):
             mock_expire.return_value = AsyncMock()
-            await recover_pending_captchas(mock_application)
+            await recover_pending_captchas(mock_state)
 
         mock_expire.assert_called_once_with(
-            bot=mock_application.bot,
+            bot=mock_state.bot,
             user_id=12345,
             group_id=-1001234567890,
             chat_id=-1001234567890,
@@ -202,7 +202,7 @@ class TestRecoverPendingCaptchas:
         assert "Captcha recovery complete" in caplog.text
 
     async def test_recover_pending_captchas_reschedule_timeout(
-        self, mock_application, mock_registry, temp_db, caplog
+        self, mock_state, mock_registry, temp_db, caplog
     ):
         caplog.set_level(logging.INFO)
         db = get_database()
@@ -229,26 +229,26 @@ class TestRecoverPendingCaptchas:
             patch("bot.services.captcha_recovery.get_group_registry", return_value=mock_registry),
             patch("bot.services.captcha_recovery.captcha_timeout_callback") as mock_callback,
         ):
-            await recover_pending_captchas(mock_application)
+            await recover_pending_captchas(mock_state)
 
-        mock_application.job_queue.run_once.assert_called_once()
-        call_args = mock_application.job_queue.run_once.call_args
-
-        assert call_args.args[0] == mock_callback
-        assert 149 <= call_args.kwargs["when"] <= 151  # Allow 1 second tolerance
-        assert call_args.kwargs["name"] == "captcha_timeout_-1001234567890_12345"
-        assert call_args.kwargs["data"]["user_id"] == 12345
-        assert call_args.kwargs["data"]["group_id"] == -1001234567890
-        assert call_args.kwargs["data"]["chat_id"] == -1001234567890
-        assert call_args.kwargs["data"]["message_id"] == 999
-        assert call_args.kwargs["data"]["user_full_name"] == "Test User"
+        job = mock_state.scheduler.get_job("captcha_timeout_-1001234567890_12345")
+        assert job is not None
+        assert job.func is mock_callback
+        # ~150s remaining (150s elapsed of 300s timeout); allow tolerance
+        remaining = (job.trigger.run_date - datetime.now(UTC)).total_seconds()
+        assert 145 <= remaining <= 155
+        assert job.kwargs["user_id"] == 12345
+        assert job.kwargs["group_id"] == -1001234567890
+        assert job.kwargs["chat_id"] == -1001234567890
+        assert job.kwargs["message_id"] == 999
+        assert job.kwargs["user_full_name"] == "Test User"
 
         assert "Recovering 1 pending captcha verification(s)" in caplog.text
         assert "Rescheduling captcha timeout for user 12345" in caplog.text
         assert "remaining:" in caplog.text
 
     async def test_recover_pending_captchas_handles_errors(
-        self, mock_application, mock_registry, temp_db, caplog
+        self, mock_state, mock_registry, temp_db, caplog
     ):
         caplog.set_level(logging.INFO)
         db = get_database()
@@ -277,13 +277,13 @@ class TestRecoverPendingCaptchas:
                 session.execute(stmt, {"created_at": old_time, "id": record.id})
                 session.commit()
 
-            await recover_pending_captchas(mock_application)
+            await recover_pending_captchas(mock_state)
 
         assert "Failed to recover captcha for user 12345: Something went wrong" in caplog.text
         assert "Captcha recovery complete" in caplog.text
 
     async def test_recover_pending_captchas_multiple_records(
-        self, mock_application, mock_registry, temp_db, caplog
+        self, mock_state, mock_registry, temp_db, caplog
     ):
         caplog.set_level(logging.INFO)
         db = get_database()
@@ -325,16 +325,16 @@ class TestRecoverPendingCaptchas:
             patch("bot.services.captcha_recovery.captcha_timeout_callback"),
         ):
             mock_expire.return_value = AsyncMock()
-            await recover_pending_captchas(mock_application)
+            await recover_pending_captchas(mock_state)
 
         # Should expire the first one
         mock_expire.assert_called_once()
         assert mock_expire.call_args.kwargs["user_id"] == 12345
 
         # Should reschedule the second one
-        mock_application.job_queue.run_once.assert_called_once()
-        call_args = mock_application.job_queue.run_once.call_args
-        assert call_args.kwargs["data"]["user_id"] == 67890
+        job = mock_state.scheduler.get_job("captcha_timeout_-1001234567890_67890")
+        assert job is not None
+        assert job.kwargs["user_id"] == 67890
 
         assert "Recovering 2 pending captcha verification(s)" in caplog.text
         assert "Expiring captcha for user 12345" in caplog.text
@@ -342,7 +342,7 @@ class TestRecoverPendingCaptchas:
         assert "Captcha recovery complete" in caplog.text
 
     async def test_recover_pending_captchas_skips_unknown_group(
-        self, mock_application, mock_registry, temp_db, caplog
+        self, mock_state, mock_registry, temp_db, caplog
     ):
         caplog.set_level(logging.WARNING)
         db = get_database()
@@ -366,9 +366,9 @@ class TestRecoverPendingCaptchas:
             session.commit()
 
         with patch("bot.services.captcha_recovery.get_group_registry", return_value=mock_registry):
-            await recover_pending_captchas(mock_application)
+            await recover_pending_captchas(mock_state)
 
         # Should skip - no expiration, no reschedule
-        mock_application.job_queue.run_once.assert_not_called()
+        assert mock_state.scheduler.get_jobs() == []
 
         assert "group no longer in registry" in caplog.text

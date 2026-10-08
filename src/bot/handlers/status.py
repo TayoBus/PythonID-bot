@@ -14,9 +14,10 @@ import logging
 import os
 import time
 
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes
-from telegram.helpers import escape_markdown
+from aiogram.types import Update
+
+from bot.dispatch import AppState, HandlerContext, HandlerSpec, command_filter, effective_chat
+from bot.services.markdown import escape_markdown
 
 from bot.config import get_settings
 from bot.database.service import get_database
@@ -52,7 +53,7 @@ def _format_filesize(path: str) -> str:
 
 
 async def _check_status_prereqs(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> bool:
     """Validate /status prerequisites: message exists, private chat, admin.
 
@@ -63,16 +64,17 @@ async def _check_status_prereqs(
         logger.warning("handle_status called without message or sender")
         return False
 
-    if update.effective_chat and update.effective_chat.type != "private":
-        await update.message.reply_text(
+    chat = effective_chat(update)
+    if chat and chat.type != "private":
+        await update.message.reply(
             "❌ Perintah ini hanya bisa digunakan di chat pribadi dengan bot."
         )
         return False
 
     admin_user_id = update.message.from_user.id
-    admin_ids = context.bot_data.get("admin_ids", [])
+    admin_ids = context.state.admin_ids
     if admin_user_id not in admin_ids:
-        await update.message.reply_text(
+        await update.message.reply(
             "❌ Kamu tidak memiliki izin untuk menggunakan perintah ini."
         )
         logger.warning(
@@ -84,7 +86,7 @@ async def _check_status_prereqs(
     return True
 
 
-async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_status(update: Update, context: HandlerContext) -> None:
     """Handle /status command in bot DM — show scoped operational state."""
     if not await _check_status_prereqs(update, context):
         return
@@ -95,7 +97,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lines: list[str] = []
 
     # --- Uptime ---
-    start = context.bot_data.get("start_time")
+    start = context.state.start_time
     if start is not None:
         uptime = _format_uptime(time.monotonic() - start)
         lines.append(f"*Uptime:* {uptime}")
@@ -106,7 +108,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     lines.append("")
     lines.append("*Grup yang kamu admin:*")
     registry = get_group_registry()
-    effective_map = context.bot_data.get("plugin_effective_map", {})
+    effective_map = context.state.plugin_effective_map
     db = get_database()
 
     all_probations = db.get_all_new_user_probations()
@@ -154,7 +156,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # --- Last jobs ---
     lines.append("")
     lines.append("*Jadwal terakhir:*")
-    refresh_ts = context.bot_data.get("last_admin_refresh")
+    refresh_ts = context.state.data.get("last_admin_refresh")
     if refresh_ts is not None:
         lines.append(
             "  • Refresh admin: "
@@ -163,7 +165,7 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("  • Refresh admin: belum pernah")
 
-    restrict_ts = context.bot_data.get("last_auto_restrict")
+    restrict_ts = context.state.data.get("last_auto_restrict")
     if restrict_ts is not None:
         lines.append(
             "  • Auto-restrict: "
@@ -172,12 +174,27 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         lines.append("  • Auto-restrict: belum pernah")
 
-    await update.message.reply_text(
+    await update.message.reply(
         "\n".join(lines),
         parse_mode="Markdown",
     )
 
 
-def get_handlers() -> list[CommandHandler]:
-    """Return list of handlers for the status command."""
-    return [CommandHandler("status", handle_status)]
+def get_handlers(state: AppState) -> list[HandlerSpec]:
+    """Return list of handler specs for the status command.
+
+    Args:
+        state: Shared application state (provides the bot username for
+            ``/status`` vs ``/status@botname`` command matching).
+    """
+    return [
+        HandlerSpec(
+            plugin_name="status",
+            group=0,
+            update_kinds=("message", "edited_message"),
+            check=command_filter("status", state),
+            callback=handle_status,
+            label="status_command",
+            command="status",
+        )
+    ]

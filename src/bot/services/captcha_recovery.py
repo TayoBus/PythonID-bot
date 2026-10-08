@@ -2,25 +2,38 @@
 Captcha recovery service for the PythonID bot.
 
 This module handles recovery of lost captcha timeout jobs on bot restart.
-Since JobQueue is in-memory, pending verifications need to be recovered
+Since the scheduler is in-memory, pending verifications need to be recovered
 from the database to prevent users from being stuck in restricted state.
 """
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from telegram import Bot
-from telegram.ext import Application
+from aiogram import Bot
 
 from bot.constants import CAPTCHA_TIMEOUT_MESSAGE
 from bot.database.service import get_database
+from bot.dispatch import AppState
 from bot.group_config import get_group_registry
-from bot.handlers.captcha import captcha_timeout_callback, get_captcha_job_name
 from bot.services.bot_info import BotInfoCache
 from bot.services.restriction_lock import restriction_lock
 from bot.services.telegram_utils import get_user_mention_by_id
 
 logger = logging.getLogger(__name__)
+
+
+def get_captcha_job_name(group_id: int, user_id: int) -> str:
+    """
+    Generate consistent job name for captcha timeout.
+
+    Args:
+        group_id: Telegram group ID.
+        user_id: Telegram user ID.
+
+    Returns:
+        str: Standardized job name for captcha timeout.
+    """
+    return f"captcha_timeout_{group_id}_{user_id}"
 
 
 async def handle_captcha_expiration(
@@ -84,7 +97,98 @@ async def handle_captcha_expiration(
     logger.info(f"User {user_id} captcha timeout - kept restricted")
 
 
-async def recover_pending_captchas(application: Application) -> None:
+async def captcha_timeout_callback(
+    *,
+    state: AppState,
+    user_id: int,
+    group_id: int,
+    chat_id: int,
+    message_id: int,
+    user_full_name: str,
+) -> None:
+    """One-shot scheduler job: expire a pending captcha when its timeout elapses.
+
+    Scheduled with a stable job id per (group_id, user_id) so re-scheduling
+    replaces any existing timeout instead of stacking duplicates.
+    """
+    bot = state.bot
+    if bot is None:
+        logger.error("captcha_timeout_callback: no bot on AppState, skipping")
+        return
+    await handle_captcha_expiration(
+        bot=bot,
+        user_id=user_id,
+        group_id=group_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        user_full_name=user_full_name,
+    )
+
+
+def schedule_captcha_timeout(
+    state: AppState,
+    *,
+    group_id: int,
+    user_id: int,
+    chat_id: int,
+    message_id: int,
+    user_full_name: str,
+    delay_seconds: float,
+) -> None:
+    """Schedule (or reschedule) the one-shot captcha timeout job.
+
+    Args:
+        state: Shared application state (scheduler).
+        group_id: Telegram group ID.
+        user_id: Telegram user ID.
+        chat_id: Chat ID where the challenge message was sent.
+        message_id: Message ID of the captcha challenge.
+        user_full_name: User's display name for the timeout message.
+        delay_seconds: Seconds from now until the timeout fires.
+    """
+    scheduler = state.scheduler
+    if scheduler is None:
+        logger.error("schedule_captcha_timeout: no scheduler on AppState")
+        return
+    scheduler.add_job(
+        captcha_timeout_callback,
+        "date",
+        run_date=datetime.now(UTC) + timedelta(seconds=delay_seconds),
+        id=get_captcha_job_name(group_id, user_id),
+        kwargs={
+            "state": state,
+            "user_id": user_id,
+            "group_id": group_id,
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "user_full_name": user_full_name,
+        },
+        replace_existing=True,
+    )
+
+
+def cancel_captcha_timeout(state: AppState, group_id: int, user_id: int) -> bool:
+    """Cancel a pending captcha timeout job.
+
+    Args:
+        state: Shared application state (scheduler).
+        group_id: Telegram group ID.
+        user_id: Telegram user ID.
+
+    Returns:
+        True if a pending timeout job was found and removed.
+    """
+    scheduler = state.scheduler
+    if scheduler is None:
+        return False
+    job = scheduler.get_job(get_captcha_job_name(group_id, user_id))
+    if job is None:
+        return False
+    job.remove()
+    return True
+
+
+async def recover_pending_captchas(state: AppState) -> None:
     """
     Recover pending captcha verifications on bot startup.
 
@@ -98,10 +202,15 @@ async def recover_pending_captchas(application: Application) -> None:
     This prevents users from being stuck in restricted state after bot restart.
 
     Args:
-        application: The Application instance with bot and job_queue.
+        state: Shared application state (bot + scheduler).
     """
     registry = get_group_registry()
     db = get_database()
+
+    bot = state.bot
+    if bot is None:
+        logger.error("recover_pending_captchas: no bot on AppState, skipping")
+        return
 
     pending_records = db.get_all_pending_captchas()
 
@@ -137,7 +246,7 @@ async def recover_pending_captchas(application: Application) -> None:
                 )
 
                 await handle_captcha_expiration(
-                    bot=application.bot,
+                    bot=bot,
                     user_id=record.user_id,
                     group_id=record.group_id,
                     chat_id=record.chat_id,
@@ -151,19 +260,14 @@ async def recover_pending_captchas(application: Application) -> None:
                     f"(remaining: {remaining_seconds:.0f}s)"
                 )
 
-                job_name = get_captcha_job_name(record.group_id, record.user_id)
-
-                application.job_queue.run_once(
-                    captcha_timeout_callback,
-                    when=remaining_seconds,
-                    name=job_name,
-                    data={
-                        "user_id": record.user_id,
-                        "group_id": record.group_id,
-                        "chat_id": record.chat_id,
-                        "message_id": record.message_id,
-                        "user_full_name": record.user_full_name,
-                    },
+                schedule_captcha_timeout(
+                    state,
+                    group_id=record.group_id,
+                    user_id=record.user_id,
+                    chat_id=record.chat_id,
+                    message_id=record.message_id,
+                    user_full_name=record.user_full_name,
+                    delay_seconds=remaining_seconds,
                 )
         except Exception as e:
             logger.error(

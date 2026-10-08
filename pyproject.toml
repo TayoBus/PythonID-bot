@@ -5,10 +5,12 @@ description = "Telegram bot that monitors group messages and warns users without
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiogram>=3.31",
+    "apscheduler>=3.11,<4",
+    "httpx>=0.28",
     "logfire>=2.6.1",
     "pydantic>=2.12.5",
     "pydantic-settings>=2.14.2",
-    "python-telegram-bot[job-queue]>=22.8",
     "sqlmodel>=0.0.28",
 ]
 
@@ -66,11 +68,11 @@ no_implicit_optional = true
 # Allow gradual adoption: only block on errors that point to real bugs
 disallow_untyped_defs = false
 disallow_any_generics = false
-# Disable error codes that are noisy from PTB / SQLModel / Pydantic v2.
+# Disable error codes that are noisy from aiogram / SQLModel / Pydantic v2.
 # The team will tighten module-by-module over time. New code should still
 # be free of these errors when added.
 disable_error_code = [
-    "arg-type",      # PTB callback data typed as object
+    "arg-type",      # aiogram update/callback payloads typed loosely
     "attr-defined",  # Pydantic v2 model access via dict unpacking
     "index",         # object indexing
     "union-attr",    # Optional access (we add None checks where it matters)

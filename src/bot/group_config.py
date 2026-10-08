@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Self
 
 from pydantic import BaseModel, field_validator
-from telegram import Update
+from aiogram.types import Update
+
+from bot.dispatch import effective_chat
 
 logger = logging.getLogger(__name__)
 
@@ -226,10 +228,11 @@ def get_group_config_for_update(update: Update) -> GroupConfig | None:
     Returns:
         GroupConfig if the chat is monitored, None otherwise.
     """
-    if not update.effective_chat:
+    chat = effective_chat(update)
+    if chat is None:
         return None
     try:
-        return get_group_registry().get(update.effective_chat.id)
+        return get_group_registry().get(chat.id)
     except RuntimeError:
         logger.error("Group registry not initialized; skipping update")
         return None

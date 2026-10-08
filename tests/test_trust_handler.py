@@ -13,6 +13,7 @@ from bot.constants import (
 )
 from bot.database.models import TrustedUserData
 from bot.database.service import get_database, init_database, reset_database
+from bot.dispatch import AppState, HandlerContext
 from bot.group_config import GroupConfig, GroupRegistry
 from bot.handlers.trust import (
     _resolve_target_user_id,
@@ -50,9 +51,10 @@ def mock_update():
     update.message.from_user.id = 12345
     update.message.from_user.full_name = "Admin User"
     update.message.from_user.username = "admin_user"
-    update.message.reply_text = AsyncMock()
-    update.effective_chat = MagicMock()
-    update.effective_chat.type = "private"
+    update.message.reply = AsyncMock()
+    update.message.answer = AsyncMock()
+    update.message.chat = MagicMock()
+    update.message.chat.type = "private"
     update.message.forward_origin = None
     update.message.forward_from = None
     return update
@@ -60,11 +62,12 @@ def mock_update():
 
 @pytest.fixture
 def mock_context():
-    context = MagicMock()
-    context.bot = MagicMock()
-    context.bot_data = {"admin_ids": [12345], "trusted_user_ids": set()}
-    context.args = []
-    return context
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    state = AppState()
+    state.admin_ids = [12345]
+    state.trusted_user_ids = set()
+    return HandlerContext(bot=bot, state=state, args=[])
 
 
 class TestTrustCommands:
@@ -87,33 +90,33 @@ class TestTrustCommands:
 
         await handle_trust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "izin" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "izin" in mock_update.message.reply.call_args.args[0]
 
     async def test_trust_command_requires_private_chat(self, mock_update, mock_context):
-        mock_update.effective_chat.type = "group"
+        mock_update.message.chat.type = "group"
         mock_context.args = ["1111"]
 
         await handle_trust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "chat pribadi" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "chat pribadi" in mock_update.message.reply.call_args.args[0]
 
     async def test_trust_command_invalid_user_id(self, mock_update, mock_context):
         mock_context.args = ["abc"]
 
         await handle_trust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "angka" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "angka" in mock_update.message.reply.call_args.args[0]
 
     async def test_trust_command_missing_user_id_and_no_forward(self, mock_update, mock_context):
         mock_context.args = []
 
         await handle_trust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "penggunaan" in mock_update.message.reply_text.call_args.args[0].lower()
+        mock_update.message.reply.assert_called_once()
+        assert "penggunaan" in mock_update.message.reply.call_args.args[0].lower()
 
     async def test_trust_command_success_by_user_id(
         self, mock_update, mock_context, mock_registry, monkeypatch
@@ -128,11 +131,11 @@ class TestTrustCommands:
         await handle_trust_command(mock_update, mock_context)
 
         assert db.is_user_trusted(1111) is True
-        assert 1111 in mock_context.bot_data["trusted_user_ids"]
-        assert isinstance(mock_context.bot_data["trusted_user_ids"], set)
+        assert 1111 in mock_context.state.trusted_user_ids
+        assert isinstance(mock_context.state.trusted_user_ids, set)
         assert db.get_new_user_probation(1111, -1001) is None
         assert db.get_new_user_probation(1111, -1002) is None
-        reply_args = mock_update.message.reply_text.call_args
+        reply_args = mock_update.message.reply.call_args
         assert "ditambahkan" in reply_args.args[0].lower()
         assert reply_args.kwargs.get("parse_mode") == "Markdown"
 
@@ -181,8 +184,8 @@ class TestTrustCommands:
 
         await handle_trust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        reply_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        reply_args = mock_update.message.reply.call_args
         assert "sudah" in reply_args.args[0].lower()
         assert reply_args.kwargs.get("parse_mode") == "Markdown"
 
@@ -202,18 +205,18 @@ class TestTrustCommands:
         await handle_trust_command(mock_update, mock_context)
 
         assert db.is_user_trusted(9111) is True
-        reply_args = mock_update.message.reply_text.call_args
+        reply_args = mock_update.message.reply.call_args
         assert "ditambahkan" in reply_args.args[0].lower()
         assert "0" in reply_args.args[0]
 
     async def test_untrust_command_requires_private_chat(self, mock_update, mock_context):
-        mock_update.effective_chat.type = "group"
+        mock_update.message.chat.type = "group"
         mock_context.args = ["2222"]
 
         await handle_untrust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "chat pribadi" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "chat pribadi" in mock_update.message.reply.call_args.args[0]
 
     async def test_untrust_command_requires_admin(self, mock_update, mock_context):
         mock_update.message.from_user.id = 99999
@@ -221,8 +224,8 @@ class TestTrustCommands:
 
         await handle_untrust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "izin" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "izin" in mock_update.message.reply.call_args.args[0]
 
     async def test_untrust_command_no_message_returns_early(self, mock_context):
         update = MagicMock()
@@ -242,30 +245,30 @@ class TestTrustCommands:
 
         await handle_untrust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "angka" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "angka" in mock_update.message.reply.call_args.args[0]
 
     async def test_untrust_command_missing_user_id_and_no_forward(self, mock_update, mock_context):
         mock_context.args = []
 
         await handle_untrust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "penggunaan" in mock_update.message.reply_text.call_args.args[0].lower()
+        mock_update.message.reply.assert_called_once()
+        assert "penggunaan" in mock_update.message.reply.call_args.args[0].lower()
 
     async def test_untrust_command_success(self, mock_update, mock_context):
         mock_context.args = ["2222"]
 
         db = get_database()
         db.add_trusted_user(TrustedUserData(user_id=2222, trusted_by_admin_id=12345))
-        mock_context.bot_data["trusted_user_ids"] = {2222}
+        mock_context.state.trusted_user_ids = {2222}
 
         await handle_untrust_command(mock_update, mock_context)
 
         assert db.is_user_trusted(2222) is False
-        assert 2222 not in mock_context.bot_data["trusted_user_ids"]
-        assert isinstance(mock_context.bot_data["trusted_user_ids"], set)
-        reply_args = mock_update.message.reply_text.call_args
+        assert 2222 not in mock_context.state.trusted_user_ids
+        assert isinstance(mock_context.state.trusted_user_ids, set)
+        reply_args = mock_update.message.reply.call_args
         assert "dihapus" in reply_args.args[0].lower()
         assert reply_args.kwargs.get("parse_mode") == "Markdown"
 
@@ -274,8 +277,8 @@ class TestTrustCommands:
 
         await handle_untrust_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        reply_args = mock_update.message.reply_text.call_args
+        mock_update.message.reply.assert_called_once()
+        reply_args = mock_update.message.reply.call_args
         assert "tidak ada" in reply_args.args[0].lower()
         assert reply_args.kwargs.get("parse_mode") == "Markdown"
 
@@ -293,26 +296,26 @@ class TestTrustCommands:
         await handle_trusted_list_command(update, mock_context)
 
     async def test_trusted_list_command_requires_private_chat(self, mock_update, mock_context):
-        mock_update.effective_chat.type = "group"
+        mock_update.message.chat.type = "group"
 
         await handle_trusted_list_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "chat pribadi" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "chat pribadi" in mock_update.message.reply.call_args.args[0]
 
     async def test_trusted_list_command_requires_admin(self, mock_update, mock_context):
         mock_update.message.from_user.id = 99999
 
         await handle_trusted_list_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "izin" in mock_update.message.reply_text.call_args.args[0]
+        mock_update.message.reply.assert_called_once()
+        assert "izin" in mock_update.message.reply.call_args.args[0]
 
     async def test_trusted_list_command_empty(self, mock_update, mock_context):
         await handle_trusted_list_command(mock_update, mock_context)
 
-        mock_update.message.reply_text.assert_called_once()
-        assert "kosong" in mock_update.message.reply_text.call_args.args[0].lower()
+        mock_update.message.reply.assert_called_once()
+        assert "kosong" in mock_update.message.reply.call_args.args[0].lower()
 
     async def test_trusted_list_command(self, mock_update, mock_context):
         db = get_database()
@@ -339,7 +342,7 @@ class TestTrustCommands:
 
         await handle_trusted_list_command(mock_update, mock_context)
 
-        message = mock_update.message.reply_text.call_args.args[0]
+        message = mock_update.message.reply.call_args.args[0]
         # Per-row order: user display (with optional @username), user id, separator,
         # admin display (with optional @username), admin id, timestamp.
         assert (
@@ -361,7 +364,7 @@ class TestTrustCommands:
 
         await handle_trusted_list_command(mock_update, mock_context)
 
-        message = mock_update.message.reply_text.call_args.args[0]
+        message = mock_update.message.reply.call_args.args[0]
         # User-side fallback (pre-cache row, no name in DB).
         assert "User 8001" in message
         # Admin-side fallback (pre-cache row, no admin name in DB).
@@ -371,7 +374,7 @@ class TestTrustCommands:
         self, mock_update, mock_context
     ):
         """Admin username with MarkdownV1 special chars must be escaped."""
-        from telegram.helpers import escape_markdown
+        from bot.services.markdown import escape_markdown
 
         db = get_database()
         db.add_trusted_user(
@@ -387,7 +390,7 @@ class TestTrustCommands:
 
         await handle_trusted_list_command(mock_update, mock_context)
 
-        message = mock_update.message.reply_text.call_args.args[0]
+        message = mock_update.message.reply.call_args.args[0]
         # Escape path: *, _, ` all escaped per MarkdownV1.
         assert f"@{escape_markdown('admin*_`star', version=1)}" in message
 
@@ -402,7 +405,8 @@ class TestTrustCallbacks:
         update.callback_query.from_user.full_name = "Admin User"
         update.callback_query.from_user.username = "admin_user"
         update.callback_query.answer = AsyncMock()
-        update.callback_query.edit_message_text = AsyncMock()
+        update.callback_query.message = MagicMock()
+        update.callback_query.message.edit_text = AsyncMock()
         return update
 
     async def test_trust_callback_no_query_returns_early(self, mock_context):
@@ -416,21 +420,21 @@ class TestTrustCallbacks:
 
         await handle_trust_callback(mock_callback_update, mock_context)
 
-        mock_callback_update.callback_query.edit_message_text.assert_called_once()
-        assert "callback" in mock_callback_update.callback_query.edit_message_text.call_args.args[0].lower()
+        mock_callback_update.callback_query.message.edit_text.assert_called_once()
+        assert "callback" in mock_callback_update.callback_query.message.edit_text.call_args.args[0].lower()
 
     async def test_trust_callback_success(self, mock_callback_update, mock_context, mock_registry, monkeypatch):
         monkeypatch.setattr("bot.handlers.trust.get_group_registry", lambda: mock_registry)
-        mock_context.bot_data["group_admin_ids"] = {-1001: [12345]}
+        mock_context.state.group_admin_ids = {-1001: [12345]}
         mock_callback_update.callback_query.data = "trust:-1001:7001"
 
         await handle_trust_callback(mock_callback_update, mock_context)
 
         assert get_database().is_user_trusted(7001) is True
-        assert 7001 in mock_context.bot_data["trusted_user_ids"]
-        assert isinstance(mock_context.bot_data["trusted_user_ids"], set)
-        mock_callback_update.callback_query.edit_message_text.assert_called_once()
-        edit_args = mock_callback_update.callback_query.edit_message_text.call_args
+        assert 7001 in mock_context.state.trusted_user_ids
+        assert isinstance(mock_context.state.trusted_user_ids, set)
+        mock_callback_update.callback_query.message.edit_text.assert_called_once()
+        edit_args = mock_callback_update.callback_query.message.edit_text.call_args
         assert edit_args.kwargs.get("parse_mode") == "Markdown"
 
         # Admin info must reach the DB from the callback path too.
@@ -443,7 +447,7 @@ class TestTrustCallbacks:
     ):
         """Callback path with admin username=None must round-trip None to DB."""
         monkeypatch.setattr("bot.handlers.trust.get_group_registry", lambda: mock_registry)
-        mock_context.bot_data["group_admin_ids"] = {-1001: [12345]}
+        mock_context.state.group_admin_ids = {-1001: [12345]}
         mock_callback_update.callback_query.from_user.username = None
         mock_callback_update.callback_query.data = "trust:-1001:7001"
 
@@ -466,22 +470,22 @@ class TestTrustCallbacks:
 
         await handle_untrust_callback(mock_callback_update, mock_context)
 
-        mock_callback_update.callback_query.edit_message_text.assert_called_once()
-        assert "callback" in mock_callback_update.callback_query.edit_message_text.call_args.args[0].lower()
+        mock_callback_update.callback_query.message.edit_text.assert_called_once()
+        assert "callback" in mock_callback_update.callback_query.message.edit_text.call_args.args[0].lower()
 
     async def test_untrust_callback_success(self, mock_callback_update, mock_context):
         get_database().add_trusted_user(TrustedUserData(user_id=7002, trusted_by_admin_id=12345))
-        mock_context.bot_data["trusted_user_ids"] = {7002}
-        mock_context.bot_data["group_admin_ids"] = {-1001: [12345]}
+        mock_context.state.trusted_user_ids = {7002}
+        mock_context.state.group_admin_ids = {-1001: [12345]}
         mock_callback_update.callback_query.data = "untrust:-1001:7002"
 
         await handle_untrust_callback(mock_callback_update, mock_context)
 
         assert get_database().is_user_trusted(7002) is False
-        assert 7002 not in mock_context.bot_data["trusted_user_ids"]
-        assert isinstance(mock_context.bot_data["trusted_user_ids"], set)
-        mock_callback_update.callback_query.edit_message_text.assert_called_once()
-        edit_args = mock_callback_update.callback_query.edit_message_text.call_args
+        assert 7002 not in mock_context.state.trusted_user_ids
+        assert isinstance(mock_context.state.trusted_user_ids, set)
+        mock_callback_update.callback_query.message.edit_text.assert_called_once()
+        edit_args = mock_callback_update.callback_query.message.edit_text.call_args
         assert edit_args.kwargs.get("parse_mode") == "Markdown"
 
     async def test_trust_callback_duplicate(
@@ -490,49 +494,49 @@ class TestTrustCallbacks:
         """Trust callback for already-trusted user yields TRUST_ALREADY_EXISTS message."""
         monkeypatch.setattr("bot.handlers.trust.get_group_registry", lambda: mock_registry)
         get_database().add_trusted_user(TrustedUserData(user_id=7003, trusted_by_admin_id=12345))
-        mock_context.bot_data["group_admin_ids"] = {-1001: [12345]}
+        mock_context.state.group_admin_ids = {-1001: [12345]}
         mock_callback_update.callback_query.data = "trust:-1001:7003"
 
         await handle_trust_callback(mock_callback_update, mock_context)
 
-        edit_args = mock_callback_update.callback_query.edit_message_text.call_args
+        edit_args = mock_callback_update.callback_query.message.edit_text.call_args
         assert "sudah" in edit_args.args[0].lower()
         assert edit_args.kwargs.get("parse_mode") == "Markdown"
 
     async def test_untrust_callback_missing_user(self, mock_callback_update, mock_context):
         """Untrust callback for user not in trusted list yields not-found message."""
-        mock_context.bot_data["group_admin_ids"] = {-1001: [12345]}
+        mock_context.state.group_admin_ids = {-1001: [12345]}
         mock_callback_update.callback_query.data = "untrust:-1001:7004"
 
         await handle_untrust_callback(mock_callback_update, mock_context)
 
-        edit_args = mock_callback_update.callback_query.edit_message_text.call_args
+        edit_args = mock_callback_update.callback_query.message.edit_text.call_args
         assert "tidak ada" in edit_args.args[0].lower()
         assert edit_args.kwargs.get("parse_mode") == "Markdown"
 
     async def test_callback_non_admin_rejected(self, mock_callback_update, mock_context):
         mock_callback_update.callback_query.from_user.id = 99999
-        mock_context.bot_data["group_admin_ids"] = {}
+        mock_context.state.group_admin_ids = {}
         mock_callback_update.callback_query.data = "trust:-1001:8003"
 
         await handle_trust_callback(mock_callback_update, mock_context)
 
-        mock_callback_update.callback_query.edit_message_text.assert_called_once()
+        mock_callback_update.callback_query.message.edit_text.assert_called_once()
         assert (
-            mock_callback_update.callback_query.edit_message_text.call_args.args[0]
+            mock_callback_update.callback_query.message.edit_text.call_args.args[0]
             == TRUST_NO_GROUP_PERMISSION_MESSAGE
         )
 
     async def test_untrust_callback_non_admin_rejected(self, mock_callback_update, mock_context):
         mock_callback_update.callback_query.from_user.id = 99999
-        mock_context.bot_data["group_admin_ids"] = {}
+        mock_context.state.group_admin_ids = {}
         mock_callback_update.callback_query.data = "untrust:-1001:8003"
 
         await handle_untrust_callback(mock_callback_update, mock_context)
 
-        mock_callback_update.callback_query.edit_message_text.assert_called_once()
+        mock_callback_update.callback_query.message.edit_text.assert_called_once()
         assert (
-            mock_callback_update.callback_query.edit_message_text.call_args.args[0]
+            mock_callback_update.callback_query.message.edit_text.call_args.args[0]
             == TRUST_NO_GROUP_PERMISSION_MESSAGE
         )
 
@@ -586,48 +590,49 @@ class TestResolveTargetUserId:
 class TestTrustedCacheHelpers:
     """Tests for ``_add_trusted_cache``/``_remove_trusted_cache`` set semantics."""
 
+    def _make_context(self) -> HandlerContext:
+        return HandlerContext(bot=MagicMock(), state=AppState(), args=[])
+
     def test_add_initialises_missing_cache_as_set(self):
         from bot.handlers.trust import _add_trusted_cache
 
-        context = MagicMock()
-        context.bot_data = {}
+        context = self._make_context()
 
         _add_trusted_cache(context, 42)
 
-        assert context.bot_data["trusted_user_ids"] == {42}
-        assert isinstance(context.bot_data["trusted_user_ids"], set)
+        assert context.state.trusted_user_ids == {42}
+        assert isinstance(context.state.trusted_user_ids, set)
 
     def test_add_mutates_existing_set_in_place(self):
         from bot.handlers.trust import _add_trusted_cache
 
         existing = {1, 2}
-        context = MagicMock()
-        context.bot_data = {"trusted_user_ids": existing}
+        context = self._make_context()
+        context.state.trusted_user_ids = existing
 
         _add_trusted_cache(context, 3)
 
-        assert context.bot_data["trusted_user_ids"] is existing
+        assert context.state.trusted_user_ids is existing
         assert existing == {1, 2, 3}
 
     def test_remove_initialises_missing_cache_as_set(self):
         from bot.handlers.trust import _remove_trusted_cache
 
-        context = MagicMock()
-        context.bot_data = {}
+        context = self._make_context()
 
         _remove_trusted_cache(context, 42)
 
-        assert context.bot_data["trusted_user_ids"] == set()
-        assert isinstance(context.bot_data["trusted_user_ids"], set)
+        assert context.state.trusted_user_ids == set()
+        assert isinstance(context.state.trusted_user_ids, set)
 
     def test_remove_mutates_existing_set_in_place(self):
         from bot.handlers.trust import _remove_trusted_cache
 
         existing = {1, 2, 3}
-        context = MagicMock()
-        context.bot_data = {"trusted_user_ids": existing}
+        context = self._make_context()
+        context.state.trusted_user_ids = existing
 
         _remove_trusted_cache(context, 2)
 
-        assert context.bot_data["trusted_user_ids"] is existing
+        assert context.state.trusted_user_ids is existing
         assert existing == {1, 3}

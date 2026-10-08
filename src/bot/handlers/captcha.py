@@ -8,16 +8,22 @@ If they don't verify within the timeout period, they remain restricted.
 
 import logging
 
+from aiogram.enums import ChatMemberStatus
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
 from sqlalchemy.exc import IntegrityError
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, User
-from telegram.constants import ChatMemberStatus
-from telegram.ext import (
-    ApplicationHandlerStop,
-    CallbackQueryHandler,
-    ChatMemberHandler,
-    ContextTypes,
-    MessageHandler,
-    filters,
+
+from bot.dispatch import (
+    HandlerContext,
+    HandlerSpec,
+    StopPropagation,
+    callback_data_pattern,
+    effective_chat,
+    has_new_chat_members,
+    is_chat_member_update,
+)
+from bot.services.captcha_recovery import (
+    cancel_captcha_timeout,
+    schedule_captcha_timeout,
 )
 
 from bot.constants import (
@@ -44,22 +50,8 @@ from bot.services.user_checker import check_user_profile
 logger = logging.getLogger(__name__)
 
 
-def get_captcha_job_name(group_id: int, user_id: int) -> str:
-    """
-    Generate consistent job name for captcha timeout.
-
-    Args:
-        group_id: Telegram group ID.
-        user_id: Telegram user ID.
-
-    Returns:
-        str: Standardized job name for captcha timeout.
-    """
-    return f"captcha_timeout_{group_id}_{user_id}"
-
-
 async def _initiate_captcha_challenge(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     user: User,
     chat_id: int,
     group_config: GroupConfig,
@@ -93,12 +85,12 @@ async def _initiate_captcha_challenge(
         logger.error(f"Failed to restrict new member {user_id}: {e}")
         return
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            "✅ Saya bukan robot",
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="✅ Saya bukan robot",
             callback_data=f"captcha_verify_{chat_id}_{user_id}",
-        )]
-    ])
+        )
+    ]])
 
     welcome_message = CAPTCHA_WELCOME_MESSAGE.format(
         user_mention=user_mention,
@@ -119,7 +111,7 @@ async def _initiate_captcha_challenge(
             CaptchaData(
                 user_id=user_id,
                 group_id=group_config.group_id,
-                chat_id=sent_message.chat_id,
+                chat_id=sent_message.chat.id,
                 message_id=sent_message.message_id,
                 user_full_name=user.full_name,
             )
@@ -128,18 +120,14 @@ async def _initiate_captcha_challenge(
         logger.info(f"Captcha already exists for user {user_id} (race condition handled)")
         return
 
-    job_name = get_captcha_job_name(group_config.group_id, user_id)
-    context.job_queue.run_once(
-        captcha_timeout_callback,
-        when=group_config.captcha_timeout_seconds,
-        name=job_name,
-        data={
-            "user_id": user_id,
-            "group_id": group_config.group_id,
-            "chat_id": sent_message.chat_id,
-            "message_id": sent_message.message_id,
-            "user_full_name": user.full_name,
-        },
+    schedule_captcha_timeout(
+        context.state,
+        group_id=group_config.group_id,
+        user_id=user_id,
+        chat_id=sent_message.chat.id,
+        message_id=sent_message.message_id,
+        user_full_name=user.full_name,
+        delay_seconds=group_config.captcha_timeout_seconds,
     )
 
     logger.info(
@@ -149,7 +137,7 @@ async def _initiate_captcha_challenge(
 
 
 async def _maybe_start_captcha(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     db: DatabaseService,
     member: User,
     group_config: GroupConfig,
@@ -176,7 +164,7 @@ async def _maybe_start_captcha(
 
 
 async def new_member_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle new chat member events.
@@ -196,7 +184,7 @@ async def new_member_handler(
     group_config = get_group_config_for_update(update)
 
     if group_config is None:
-        logger.info(f"Message from unmonitored chat {update.effective_chat.id if update.effective_chat else None}, skipping")
+        logger.info(f"Message from unmonitored chat {effective_chat(update).id if effective_chat(update) else None}, skipping")
         return
 
     logger.info(f"Processing new members: {len(update.message.new_chat_members)} member(s)")
@@ -210,7 +198,7 @@ async def new_member_handler(
 
 
 async def chat_member_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle chat member updates to detect new members.
@@ -230,19 +218,19 @@ async def chat_member_handler(
     group_config = get_group_config_for_update(update)
 
     if group_config is None:
-        logger.info(f"Update from unmonitored chat {update.effective_chat.id if update.effective_chat else None}, skipping")
+        logger.info(f"Update from unmonitored chat {effective_chat(update).id if effective_chat(update) else None}, skipping")
         return
 
     old_status = update.chat_member.old_chat_member.status
     new_status = update.chat_member.new_chat_member.status
 
     # Detect if this is a join event: user was not a member and now is a member
-    left_statuses = {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED}
+    left_statuses = {ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}
     member_statuses = {
         ChatMemberStatus.MEMBER,
         ChatMemberStatus.RESTRICTED,
         ChatMemberStatus.ADMINISTRATOR,
-        ChatMemberStatus.OWNER,
+        ChatMemberStatus.CREATOR,
     }
 
     if old_status not in left_statuses or new_status not in member_statuses:
@@ -262,7 +250,7 @@ async def chat_member_handler(
 
 
 async def captcha_callback_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle captcha verification button press.
@@ -306,13 +294,13 @@ async def captcha_callback_handler(
     # Validate that this callback comes from the original challenge message.
     # Prevents stale or spoofed callbacks from acting on a different challenge.
     if query.message and (
-        query.message.chat_id != pending.chat_id
+        query.message.chat.id != pending.chat_id
         or query.message.message_id != pending.message_id
     ):
         logger.warning(
             f"Captcha callback from wrong message for user {target_user_id}: "
             f"expected chat={pending.chat_id} msg={pending.message_id}, "
-            f"got chat={query.message.chat_id} msg={query.message.message_id}"
+            f"got chat={query.message.chat.id} msg={query.message.message_id}"
         )
         await query.answer(CAPTCHA_FAILED_VERIFICATION_MESSAGE, show_alert=True)
         return
@@ -348,15 +336,15 @@ async def captcha_callback_handler(
                 removed = db.remove_pending_captcha(target_user_id, group_config.group_id)
                 if not removed:
                     logger.info(f"Captcha for user {target_user_id} already finalized, ignoring duplicate callback")
-                    raise ApplicationHandlerStop
+                    raise StopPropagation
                 db.start_new_user_probation(target_user_id, group_config.group_id)
-            except ApplicationHandlerStop:
+            except StopPropagation:
                 raise
             except Exception as e:
                 logger.error(f"DB finalization failed for user {target_user_id}: {e}", exc_info=True)
                 # User is already unrestricted on Telegram. DB inconsistency is
                 # non-fatal — continue to show success message.
-    except ApplicationHandlerStop:
+    except StopPropagation:
         await query.answer()
         return
     except Exception as e:
@@ -364,9 +352,7 @@ async def captcha_callback_handler(
         await query.answer(CAPTCHA_FAILED_VERIFICATION_MESSAGE, show_alert=True)
         return
 
-    job_name = get_captcha_job_name(group_config.group_id, target_user_id)
-    for job in context.job_queue.get_jobs_by_name(job_name):
-        job.schedule_removal()
+    if cancel_captcha_timeout(context.state, group_config.group_id, target_user_id):
         logger.info(f"Cancelled timeout job for user {target_user_id}")
 
     user_mention = get_user_mention(query.from_user)
@@ -374,70 +360,51 @@ async def captcha_callback_handler(
     await query.answer()
 
     try:
-        await query.edit_message_text(
-            text=CAPTCHA_VERIFIED_MESSAGE.format(user_mention=user_mention),
-            parse_mode="Markdown",
-        )
+        if query.message is not None:
+            await query.message.edit_text(
+                text=CAPTCHA_VERIFIED_MESSAGE.format(user_mention=user_mention),
+                parse_mode="Markdown",
+            )
     except Exception as e:
         logger.error(f"Failed to edit captcha message: {e}")
 
     logger.info(f"User {target_user_id} ({query.from_user.full_name}) verified successfully")
 
 
-async def captcha_timeout_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
+def get_handlers() -> list[HandlerSpec]:
     """
-    Job callback for captcha timeout.
-
-    Called when the timeout period expires without user verification.
-    Keeps the user restricted and provides a DM link to unrestrict.
-
-    Args:
-        context: Bot context containing job data.
-    """
-    from bot.services.captcha_recovery import handle_captcha_expiration
-
-    job = context.job
-    if not job or not job.data:
-        return
-
-    data = job.data
-    user_id = data["user_id"]
-    group_id = data["group_id"]
-    chat_id = data["chat_id"]
-    message_id = data["message_id"]
-    user_full_name = data.get("user_full_name", f"User {user_id}")
-
-    await handle_captcha_expiration(
-        bot=context.bot,
-        user_id=user_id,
-        group_id=group_id,
-        chat_id=chat_id,
-        message_id=message_id,
-        user_full_name=user_full_name,
-    )
-
-
-def get_handlers() -> list:
-    """
-    Return list of handlers to register for captcha verification.
+    Return handler specs for captcha verification.
 
     Returns:
-        list: List containing chat member handler, message handler (fallback),
-              and callback query handler.
+        List of HandlerSpec: chat member handler, message handler (fallback),
+        and callback query handler. The plugin layer wraps callbacks with
+        ``guard_plugin("captcha")`` before registration.
     """
     return [
         # Primary handler: ChatMemberUpdated - works even with hidden join messages
-        ChatMemberHandler(
-            chat_member_handler,
-            chat_member_types=ChatMemberHandler.CHAT_MEMBER,
+        HandlerSpec(
+            plugin_name="captcha",
+            group=0,
+            update_kinds=("chat_member",),
+            check=is_chat_member_update,
+            callback=chat_member_handler,
+            label="captcha_chat_member",
         ),
-        # Fallback handler: StatusUpdate - for groups with visible join messages
-        MessageHandler(
-            filters.StatusUpdate.NEW_CHAT_MEMBERS,
-            new_member_handler,
+        # Fallback handler: new chat members - for groups with visible join messages
+        HandlerSpec(
+            plugin_name="captcha",
+            group=0,
+            update_kinds=("message", "edited_message"),
+            check=has_new_chat_members,
+            callback=new_member_handler,
+            label="captcha_new_members",
         ),
-        CallbackQueryHandler(
-            captcha_callback_handler,
-            pattern=r"^captcha_verify_-?\d+_\d+$",
+        HandlerSpec(
+            plugin_name="captcha",
+            group=0,
+            update_kinds=("callback_query",),
+            check=callback_data_pattern(r"^captcha_verify_-?\d+_\d+$"),
+            callback=captcha_callback_handler,
+            label="captcha_callback",
         ),
     ]

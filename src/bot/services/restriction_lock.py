@@ -3,7 +3,7 @@
 Telegram has a single physical restriction state per user per chat.
 When multiple code paths (guest-bot handler, profile scheduler, DM
 unrestriction, admin /verify) can restrict or unrestrict the same user
-concurrently — especially when JobQueue jobs overlap with message
+concurrently — especially when scheduler jobs overlap with message
 handlers — the DB restriction flags and Telegram's physical state can
 diverge.
 

@@ -31,6 +31,29 @@ async def reset_state():
     await classifier_client.close_client()
 
 
+@pytest.fixture(autouse=True)
+def _sanitize_proxy_env(monkeypatch):
+    """Neutralize ambient proxy environment variables.
+
+    httpx.AsyncClient() reads proxy config from the environment by default,
+    and some environments export entries it cannot parse (e.g. bracketed
+    IPv6 like [::1] in no_proxy, which httpx misreads as port ':1]' and
+    raises InvalidURL on client construction). The tests that build a real
+    client must not depend on ambient proxy configuration.
+    """
+    for var in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 def make_response(status_code: int = 200, payload: dict | None = None) -> MagicMock:
     response = MagicMock(spec=httpx.Response)
     response.status_code = status_code

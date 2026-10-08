@@ -9,8 +9,7 @@ group may have different threshold settings.
 import logging
 import time
 
-from telegram.constants import ChatMemberStatus
-from telegram.ext import ContextTypes
+from aiogram.enums import ChatMemberStatus
 
 from bot.constants import (
     RESTRICTED_PERMISSIONS,
@@ -18,6 +17,7 @@ from bot.constants import (
     format_threshold_display,
 )
 from bot.database.service import get_database
+from bot.dispatch import AppState
 from bot.group_config import get_group_registry
 from bot.services.bot_info import BotInfoCache
 from bot.services.restriction_lock import restriction_lock
@@ -32,7 +32,7 @@ from bot.services.user_checker import check_user_profile
 logger = logging.getLogger(__name__)
 
 
-async def auto_restrict_expired_warnings(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def auto_restrict_expired_warnings(state: AppState) -> None:
     """
     Periodically check and restrict users who exceeded time threshold.
 
@@ -44,13 +44,16 @@ async def auto_restrict_expired_warnings(context: ContextTypes.DEFAULT_TYPE) -> 
     users who have already fixed their profile since the last warning.
 
     Args:
-        context: Telegram job context for sending messages.
+        state: Shared application state (bot + scheduler + caches).
     """
     logger.info("Starting auto-restriction job")
     registry = get_group_registry()
     db = get_database()
 
-    bot = context.bot
+    bot = state.bot
+    if bot is None:
+        logger.error("auto_restrict_expired_warnings: no bot on AppState, skipping")
+        return
     bot_username = await BotInfoCache.get_username(bot)
 
     for group_config in registry.all_groups():
@@ -76,7 +79,7 @@ async def auto_restrict_expired_warnings(context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.info(f"Checking status for user_id={warning.user_id}")
                 user_status = await get_user_status(bot, group_config.group_id, warning.user_id)
 
-                if user_status == ChatMemberStatus.BANNED:
+                if user_status == ChatMemberStatus.KICKED:
                     db.delete_user_warnings(warning.user_id, warning.group_id)
                     logger.info(
                         f"Skipped auto-restriction for user {warning.user_id} - user banned (group_id={group_config.group_id})"
@@ -165,4 +168,4 @@ async def auto_restrict_expired_warnings(context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.error(
                     f"Error auto-restricting user {warning.user_id} in group {group_config.group_id}: {e}", exc_info=True
                 )
-    context.bot_data["last_auto_restrict"] = time.time()
+    state.data["last_auto_restrict"] = time.time()

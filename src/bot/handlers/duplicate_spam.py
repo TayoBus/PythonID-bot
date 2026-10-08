@@ -22,8 +22,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 
-from telegram import Message, Update
-from telegram.ext import ApplicationHandlerStop, ContextTypes
+from aiogram.types import Message, Update
+
+from bot.dispatch import HandlerContext, StopPropagation
 
 from bot.constants import (
     DUPLICATE_SPAM_RESTRICTION,
@@ -100,10 +101,10 @@ def _media_file_unique_id(message: Message) -> str | None:
 
 
 def _get_recent_messages(
-    context: ContextTypes.DEFAULT_TYPE, group_id: int, user_id: int
+    context: HandlerContext, group_id: int, user_id: int
 ) -> deque[RecentMessage]:
     """Get or create the recent messages deque for a (group, user) pair."""
-    return context.bot_data.setdefault(RECENT_MESSAGES_KEY, {}).setdefault(
+    return context.state.data.setdefault(RECENT_MESSAGES_KEY, {}).setdefault(
         (group_id, user_id), deque()
     )
 
@@ -117,13 +118,13 @@ def _prune_old_messages(
 
 
 def _log_short_message_skip(
-    context: ContextTypes.DEFAULT_TYPE, group_config: GroupConfig, user_id: int,
+    context: HandlerContext, group_config: GroupConfig, user_id: int,
     normalized_len: int,
 ) -> None:
     """Log a short-message skip, rate-limited to once per window per (group, user)."""
     key = (group_config.group_id, user_id)
     now = datetime.now(UTC)
-    last_logged: dict[tuple[int, int], datetime] = context.bot_data.setdefault(
+    last_logged: dict[tuple[int, int], datetime] = context.state.data.setdefault(
         _MINLEN_SKIP_LOG_KEY, {}
     )
     last = last_logged.get(key)
@@ -140,7 +141,7 @@ def _log_short_message_skip(
 
 
 async def handle_duplicate_spam(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Detect and handle duplicate message spam.
@@ -212,11 +213,11 @@ async def handle_duplicate_spam(
     dq.append(current_message)
 
     # Track last-touch timestamp for cache eviction
-    last_touch = context.bot_data.setdefault(_RECENT_LAST_TOUCH_KEY, {})
+    last_touch = context.state.data.setdefault(_RECENT_LAST_TOUCH_KEY, {})
     last_touch[(group_config.group_id, user.id)] = now
 
     # Evict oldest entries when cache exceeds the cap
-    recent = context.bot_data[RECENT_MESSAGES_KEY]
+    recent = context.state.data[RECENT_MESSAGES_KEY]
     if len(recent) >= RECENT_MESSAGES_MAX_SIZE:
         sorted_keys = sorted(last_touch, key=lambda k: last_touch[k])
         for k in sorted_keys[:RECENT_MESSAGES_MAX_SIZE // 2]:
@@ -255,11 +256,11 @@ async def handle_duplicate_spam(
 
     await _enforce_restriction(context, group_config, user, user_mention, total_count)
 
-    raise ApplicationHandlerStop
+    raise StopPropagation
 
 
 async def _enforce_restriction(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     group_config: GroupConfig,
     user: object,
     user_mention: str,

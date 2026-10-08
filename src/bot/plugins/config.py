@@ -11,13 +11,12 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Callable, Coroutine
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from aiogram.types import Update
+
+from bot.dispatch import HandlerContext, effective_chat
 from bot.plugins.definitions import PLUGIN_NAMES
-
-if TYPE_CHECKING:
-    from telegram import Update
-    from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +106,7 @@ def guard_plugin(
 ]:
     """Return decorator that gates a handler callback on plugin enable state.
 
-    Checks ``context.bot_data["plugin_effective_map"]`` by group id and
+    Checks ``context.state.plugin_effective_map`` by group id and
     ``plugin_name``.  If the plugin is disabled for the group, the
     decorated callback early-returns (no-op).
 
@@ -120,7 +119,7 @@ def guard_plugin(
     Usage::
 
         @guard_plugin("profile_monitor")
-        async def my_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        async def my_handler(update: Update, context: HandlerContext) -> None:
             ...
 
     Args:
@@ -135,20 +134,20 @@ def guard_plugin(
         @functools.wraps(callback)
         async def wrapper(
             update: Update,
-            context: ContextTypes.DEFAULT_TYPE,
+            context: HandlerContext,
             *args: Any,
             **kwargs: Any,
         ) -> None:
             # Only gate group/supergroup updates
-            if update.effective_chat is None or update.effective_chat.type not in ("group", "supergroup"):
+            chat = effective_chat(update)
+            if chat is None or chat.type not in ("group", "supergroup"):
                 await callback(update, context, *args, **kwargs)
                 return
 
-            group_id = update.effective_chat.id
-            effective_map: dict[int, dict[str, bool]] = context.bot_data.get("plugin_effective_map", {})
+            effective_map: dict[int, dict[str, bool]] = context.state.plugin_effective_map
 
-            if not is_plugin_enabled_for_group(effective_map, group_id, plugin_name):
-                logger.debug(f"Plugin '{plugin_name}' disabled for group {group_id}, skipping")
+            if not is_plugin_enabled_for_group(effective_map, chat.id, plugin_name):
+                logger.debug(f"Plugin '{plugin_name}' disabled for group {chat.id}, skipping")
                 return
 
             await callback(update, context, *args, **kwargs)

@@ -1,52 +1,61 @@
 """Tests for the captcha plugin handler registration."""
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
+from bot.dispatch import AppState, HandlerSpec
 from bot.plugins.builtin.captcha import register_captcha
 
 
-class _FakeHandler:
-    """Minimal stub with a real callback attribute for copy.copy testing."""
+def _make_spec(label: str) -> HandlerSpec:
+    async def _callback(update, context):
+        pass
 
-    def __init__(self):
-        self.callback = lambda update, context: None
+    return HandlerSpec(
+        plugin_name="captcha",
+        group=0,
+        update_kinds=("message",),
+        check=lambda update: True,
+        callback=_callback,
+        label=label,
+    )
 
 
 def test_register_captcha_clones_handlers():
-    """Test that register_captcha clones handlers before wrapping."""
-    mock_app = MagicMock()
+    """Test that register_captcha rebuilds specs before wrapping."""
+    state = AppState()
 
-    handler1 = _FakeHandler()
-    handler2 = _FakeHandler()
-    original_id1 = id(handler1)
-    original_id2 = id(handler2)
-    fixed_handlers = [handler1, handler2]
+    spec1 = _make_spec("one")
+    spec2 = _make_spec("two")
+    fixed_handlers = [spec1, spec2]
 
     with patch("bot.plugins.builtin.captcha.captcha.get_handlers", return_value=fixed_handlers):
-        registered = register_captcha(mock_app)
+        registered = register_captcha(state)
 
-    # Registered handlers must be different objects (cloned)
+    # Registered specs must be different objects (rebuilt, not mutated)
     for reg in registered:
-        assert id(reg) != original_id1 and id(reg) != original_id2, (
-            "Handler should be cloned, not original"
+        assert reg is not spec1 and reg is not spec2, (
+            "Spec should be rebuilt, not the original"
         )
-    # Cloned callback must be wrapped (different from original)
-    assert registered[0].callback is not handler1.callback
-    assert registered[1].callback is not handler2.callback
+    # Wrapped callbacks must differ from the originals
+    assert registered[0].callback is not spec1.callback
+    assert registered[1].callback is not spec2.callback
+    # Non-callback fields are preserved
+    assert registered[0].label == "one"
+    assert registered[0].group == 0
 
 
 def test_register_captcha_does_not_mutate_original_handlers():
-    """Test that register_captcha clones handlers instead of mutating originals."""
-    mock_app = MagicMock()
+    """Test that register_captcha rebuilds specs instead of mutating originals."""
+    state = AppState()
 
-    handler1 = _FakeHandler()
-    handler2 = _FakeHandler()
-    original_cb1 = handler1.callback
-    original_cb2 = handler2.callback
-    fixed_handlers = [handler1, handler2]
+    spec1 = _make_spec("one")
+    spec2 = _make_spec("two")
+    original_cb1 = spec1.callback
+    original_cb2 = spec2.callback
+    fixed_handlers = [spec1, spec2]
 
     with patch("bot.plugins.builtin.captcha.captcha.get_handlers", return_value=fixed_handlers):
-        register_captcha(mock_app)
+        register_captcha(state)
 
-    # Original handler callbacks must be unchanged
-    assert handler1.callback is original_cb1, "Original handler callback should not be mutated"
-    assert handler2.callback is original_cb2, "Original handler callback should not be mutated"
+    # Original spec callbacks must be unchanged
+    assert spec1.callback is original_cb1, "Original spec callback should not be mutated"
+    assert spec2.callback is original_cb2, "Original spec callback should not be mutated"

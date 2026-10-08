@@ -5,8 +5,9 @@ import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from telegram import CallbackQuery, Chat, Message, User
-from telegram.error import BadRequest
+from aiogram.exceptions import TelegramBadRequest
+
+from bot.dispatch import AppState, HandlerContext
 
 from bot.group_config import GroupConfig
 from bot.handlers import ai_spam_monitor
@@ -82,19 +83,17 @@ def make_multi_result(
     )
 
 
-def make_context() -> MagicMock:
-    context = MagicMock()
-    context.bot_data = {"group_admin_ids": {GROUP_ID: [1, 2]}}
-    context.bot = MagicMock()
-    context.bot.send_message = AsyncMock()
-    context.bot.delete_message = AsyncMock()
-    context.bot.ban_chat_member = AsyncMock()
-    context.bot.restrict_chat_member = AsyncMock()
-    application = MagicMock()
-    application.create_task = MagicMock(
-        side_effect=lambda coro, update=None: coro.close()
-    )
-    context.application = application
+def make_context() -> HandlerContext:
+    bot = MagicMock()
+    bot.send_message = AsyncMock()
+    bot.delete_message = AsyncMock()
+    bot.ban_chat_member = AsyncMock()
+    bot.restrict_chat_member = AsyncMock()
+    state = AppState(bot=bot)
+    state.group_admin_ids = {GROUP_ID: [1, 2]}
+    state.trusted_user_ids = set()
+    context = HandlerContext(bot=bot, state=state)
+    context.create_task = MagicMock(side_effect=lambda coro: coro.close())  # type: ignore[method-assign]
     return context
 
 
@@ -105,19 +104,27 @@ def make_update(
     message_id: int = 100,
 ) -> MagicMock:
     update = MagicMock()
-    update.message = None
-    update.effective_message = MagicMock(spec=Message)
-    update.effective_message.text = text
-    update.effective_message.message_id = message_id
-    update.effective_message.chat_id = GROUP_ID
-    update.effective_user = MagicMock(spec=User)
-    update.effective_user.id = user_id
-    update.effective_user.is_bot = is_bot
-    update.effective_user.full_name = "Test User"
-    update.effective_user.username = "testuser"
-    update.effective_user.first_name = "Test"
-    update.effective_chat = MagicMock(spec=Chat)
-    update.effective_chat.id = GROUP_ID
+    message = MagicMock()
+    message.text = text
+    message.message_id = message_id
+    chat = MagicMock()
+    chat.id = GROUP_ID
+    chat.type = "supergroup"
+    message.chat = chat
+    user = MagicMock()
+    user.id = user_id
+    user.is_bot = is_bot
+    user.full_name = "Test User"
+    user.username = "testuser"
+    user.first_name = "Test"
+    message.from_user = user
+    update.message = message
+    update.edited_message = None
+    update.callback_query = None
+    update.chat_member = None
+    # Convenience aliases used by tests (not read by the handler itself)
+    update.effective_message = message
+    update.effective_user = user
     return update
 
 
@@ -152,7 +159,7 @@ class TestHandleAiSpamMonitor:
     """Tests for the last-defense entry handler."""
 
     @pytest.fixture
-    def context(self) -> MagicMock:
+    def context(self) -> HandlerContext:
         return make_context()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
@@ -160,35 +167,35 @@ class TestHandleAiSpamMonitor:
         mock_settings.return_value = make_settings()
         update = make_update(text="ok siap")
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_not_called()
+        context.create_task.assert_not_called()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
     async def test_skips_media_message(self, mock_settings, context):
         mock_settings.return_value = make_settings()
         update = make_update(text=None)
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_not_called()
+        context.create_task.assert_not_called()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
     async def test_skips_bot_user(self, mock_settings, context):
         mock_settings.return_value = make_settings()
         update = make_update(user_id=99, is_bot=True)
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_not_called()
+        context.create_task.assert_not_called()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
     async def test_skips_admin(self, mock_settings, context):
         mock_settings.return_value = make_settings()
         update = make_update(user_id=1)
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_not_called()
+        context.create_task.assert_not_called()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
     async def test_skips_when_budget_exhausted(self, mock_settings, context):
         mock_settings.return_value = make_settings(ai_spam_daily_budget=0)
         update = make_update()
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_not_called()
+        context.create_task.assert_not_called()
 
     @patch("bot.handlers.ai_spam_monitor.breaker_is_open")
     @patch("bot.handlers.ai_spam_monitor.get_settings")
@@ -197,34 +204,34 @@ class TestHandleAiSpamMonitor:
         mock_breaker.return_value = True
         update = make_update()
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_not_called()
+        context.create_task.assert_not_called()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
     async def test_spawns_background_task_for_regular_user(self, mock_settings, context):
         mock_settings.return_value = make_settings()
         update = make_update()
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_called_once()
+        context.create_task.assert_called_once()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
     async def test_skips_trusted_user(self, mock_settings, context):
         mock_settings.return_value = make_settings()
-        context.bot_data["trusted_user_ids"] = {42}
+        context.state.trusted_user_ids = {42}
         update = make_update()
         await handle_ai_spam_monitor(update, context)
-        context.application.create_task.assert_not_called()
+        context.create_task.assert_not_called()
 
 
 class TestClassifyAndAlert:
     """Tests for the background classification + alert coroutine."""
 
     @pytest.fixture
-    def context(self) -> MagicMock:
+    def context(self) -> HandlerContext:
         return make_context()
 
     async def alert_on(
         self,
-        context: MagicMock,
+        context: HandlerContext,
         result: ClassificationResult | None = make_spam_result(),
         alert_chat_id: int | None = ALERT_CHAT_ID,
         profile: ProfileCheckResult | None = None,
@@ -514,7 +521,7 @@ class TestClassifyAndAlert:
         await self.alert_on(context)
         await self.alert_on(context)
         context.bot.send_message.assert_awaited_once()
-        assert (GROUP_ID, 100) in context.bot_data[ALERTS_KEY]
+        assert (GROUP_ID, 100) in context.state.data[ALERTS_KEY]
 
     async def test_profile_check_failure_still_alerts(self, context):
         with (
@@ -540,7 +547,7 @@ class TestClassifyAndAlert:
     async def test_send_failure_is_swallowed(self, context):
         context.bot.send_message = AsyncMock(side_effect=RuntimeError("telegram down"))
         await self.alert_on(context)
-        assert (GROUP_ID, 100) in context.bot_data[ALERTS_KEY]
+        assert (GROUP_ID, 100) in context.state.data[ALERTS_KEY]
 
     async def test_registry_runtime_error_returns_none(self, context):
         with (
@@ -565,25 +572,26 @@ class TestClassifyAndAlert:
 
     async def test_alert_dedup_evicts_old_entries(self, context):
         alerts = {(i, i): 0 for i in range(ai_spam_monitor.ALERTS_MAX_SIZE)}
-        context.bot_data[ALERTS_KEY] = alerts
+        context.state.data[ALERTS_KEY] = alerts
         await self.alert_on(context)
-        assert len(context.bot_data[ALERTS_KEY]) < ai_spam_monitor.ALERTS_MAX_SIZE
-        assert (GROUP_ID, 100) in context.bot_data[ALERTS_KEY]
+        assert len(context.state.data[ALERTS_KEY]) < ai_spam_monitor.ALERTS_MAX_SIZE
+        assert (GROUP_ID, 100) in context.state.data[ALERTS_KEY]
         context.bot.send_message.assert_awaited_once()
 
 
 def make_callback_update(action: str, admin_id: int = 1) -> MagicMock:
     update = MagicMock()
-    update.callback_query = MagicMock(spec=CallbackQuery)
-    update.callback_query.data = f"aispam:{action}:{GROUP_ID}:42:100"
-    update.callback_query.from_user = MagicMock(spec=User)
-    update.callback_query.from_user.id = admin_id
-    update.callback_query.from_user.full_name = "Admin"
-    update.callback_query.from_user.username = "admin"
-    update.callback_query.message = MagicMock(spec=Message)
-    update.callback_query.message.text = "[AI SPAM MONITOR]\nPesan"
-    update.callback_query.answer = AsyncMock()
-    update.callback_query.edit_message_text = AsyncMock()
+    query = MagicMock()
+    query.data = f"aispam:{action}:{GROUP_ID}:42:100"
+    query.from_user = MagicMock()
+    query.from_user.id = admin_id
+    query.from_user.full_name = "Admin"
+    query.from_user.username = "admin"
+    query.message = MagicMock()
+    query.message.text = "[AI SPAM MONITOR]\nPesan"
+    query.message.edit_text = AsyncMock()
+    query.answer = AsyncMock()
+    update.callback_query = query
     return update
 
 
@@ -657,8 +665,8 @@ class TestHandleAiSpamAction:
         context.bot.delete_message.assert_awaited_once_with(
             chat_id=GROUP_ID, message_id=100
         )
-        update.callback_query.edit_message_text.assert_awaited_once()
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        update.callback_query.message.edit_text.assert_awaited_once()
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert "hapus pesan" in text
         assert "@admin" in text
 
@@ -669,7 +677,7 @@ class TestHandleAiSpamAction:
         context.bot.delete_message.assert_not_awaited()
         context.bot.restrict_chat_member.assert_not_awaited()
         context.bot.ban_chat_member.assert_not_awaited()
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert "abaikan" in text
 
     async def test_delete_restrict_restricts_member(self):
@@ -679,7 +687,7 @@ class TestHandleAiSpamAction:
             await handle_ai_spam_action(update, context)
         mock_restrict.assert_awaited_once()
         context.bot.ban_chat_member.assert_not_awaited()
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert "hapus + batasi" in text
 
     async def test_delete_ban_bans_member(self):
@@ -689,34 +697,36 @@ class TestHandleAiSpamAction:
         context.bot.ban_chat_member.assert_awaited_once_with(
             chat_id=GROUP_ID, user_id=42
         )
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert "hapus + ban" in text
 
     async def test_gone_message_notes_it_but_still_bans(self):
         context = make_context()
-        context.bot.delete_message = AsyncMock(side_effect=BadRequest("message to delete not found"))
+        context.bot.delete_message = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="message to delete not found"))
         update = make_callback_update(ACTION_DELETE_BAN)
         await handle_ai_spam_action(update, context)
         context.bot.ban_chat_member.assert_awaited_once()
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert ai_spam_monitor.AI_SPAM_CB_MESSAGE_GONE in text
 
     async def test_failed_ban_noted_in_alert(self):
         context = make_context()
-        context.bot.ban_chat_member = AsyncMock(side_effect=BadRequest("not enough rights"))
+        context.bot.ban_chat_member = AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="not enough rights"))
         update = make_callback_update(ACTION_DELETE_BAN)
         await handle_ai_spam_action(update, context)
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert "ban gagal" in text
 
     async def test_admin_of_other_group_rejected(self):
         context = make_context()
         update = MagicMock()
-        update.callback_query = MagicMock(spec=CallbackQuery)
-        update.callback_query.data = f"aispam:{ACTION_DELETE}:-200:42:100"
-        update.callback_query.from_user = MagicMock(spec=User)
-        update.callback_query.from_user.id = 1
-        update.callback_query.answer = AsyncMock()
+        query = MagicMock()
+        query.data = f"aispam:{ACTION_DELETE}:-200:42:100"
+        query.from_user = MagicMock()
+        query.from_user.id = 1
+        query.message = MagicMock()
+        query.answer = AsyncMock()
+        update.callback_query = query
         await handle_ai_spam_action(update, context)
         update.callback_query.answer.assert_awaited_once_with(
             ai_spam_monitor.AI_SPAM_CB_NOT_ADMIN, show_alert=True
@@ -733,8 +743,10 @@ class TestHandleAiSpamAction:
     async def test_no_callback_data_ignored(self):
         context = make_context()
         update = MagicMock()
-        update.callback_query = MagicMock(spec=CallbackQuery)
-        update.callback_query.data = None
+        query = MagicMock()
+        query.data = None
+        query.message = MagicMock()
+        update.callback_query = query
         await handle_ai_spam_action(update, context)
         context.bot.delete_message.assert_not_awaited()
 
@@ -746,7 +758,7 @@ class TestHandleAiSpamAction:
             new=AsyncMock(return_value=False),
         ):
             await handle_ai_spam_action(update, context)
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert "pembatasan gagal" in text
 
     async def test_restrict_exception_noted(self):
@@ -754,17 +766,17 @@ class TestHandleAiSpamAction:
         update = make_callback_update(ACTION_DELETE_RESTRICT)
         with patch(
             "bot.handlers.ai_spam_monitor.restrict_chat_member_with_retry",
-            new=AsyncMock(side_effect=BadRequest("not enough rights")),
+            new=AsyncMock(side_effect=TelegramBadRequest(method=MagicMock(), message="not enough rights")),
         ):
             await handle_ai_spam_action(update, context)
-        text = update.callback_query.edit_message_text.await_args.args[0]
+        text = update.callback_query.message.edit_text.await_args.args[0]
         assert "pembatasan gagal" in text
 
     async def test_edit_failure_logged_not_raised(self):
         context = make_context()
         update = make_callback_update(ACTION_DELETE)
-        update.callback_query.edit_message_text = AsyncMock(
-            side_effect=BadRequest("cannot edit")
+        update.callback_query.message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="cannot edit")
         )
         await handle_ai_spam_action(update, context)
         update.callback_query.answer.assert_awaited_once()
@@ -773,10 +785,15 @@ class TestHandleAiSpamAction:
 class TestGetHandlers:
     """Tests for get_handlers."""
 
-    def test_returns_message_and_callback_handlers(self):
-        from telegram.ext import CallbackQueryHandler, MessageHandler
+    def test_returns_message_and_callback_specs(self):
+        from bot.dispatch import HandlerSpec
 
         handlers = ai_spam_monitor.get_handlers()
         assert len(handlers) == 2
-        assert isinstance(handlers[0], MessageHandler)
-        assert isinstance(handlers[1], CallbackQueryHandler)
+        assert all(isinstance(h, HandlerSpec) for h in handlers)
+        kinds = [h.update_kinds for h in handlers]
+        assert ("message", "edited_message") in kinds
+        assert ("callback_query",) in kinds
+        groups = {h.label: h.group for h in handlers}
+        assert groups["ai_spam_monitor"] == 7
+        assert groups["ai_spam_callback"] == 0

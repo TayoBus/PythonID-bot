@@ -16,10 +16,15 @@ register_unverify, etc.) for fine-grained plugin registration.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
-from telegram.ext import CallbackQueryHandler, CommandHandler, MessageHandler, filters
-
+from bot.dispatch import (
+    AppState,
+    HandlerSpec,
+    callback_data_pattern,
+    command_filter,
+    is_forwarded,
+    is_private_chat,
+)
 from bot.handlers.check import (
     handle_check_command,
     handle_check_forwarded_message,
@@ -42,132 +47,154 @@ from bot.handlers.verify import (
 )
 from bot.handlers.warn import handle_warn_command
 
-if TYPE_CHECKING:
-    from telegram.ext import Application, BaseHandler
-
 logger = logging.getLogger(__name__)
 
+_MESSAGE_KINDS = ("message", "edited_message")
 
-# --- Helper for handler registration ---
 
-def _register(application: Application, handler: BaseHandler, label: str) -> list[BaseHandler]:  # type: ignore[type-arg]
-    """Register a handler and log the registration."""
-    application.add_handler(handler)
+# --- Helpers for handler spec construction ---
+
+def _command_spec(
+    state: AppState, command: str, callback, label: str
+) -> list[HandlerSpec]:
+    """Build a group=0 command handler spec (matches /cmd and /cmd@botname)."""
+    spec = HandlerSpec(
+        plugin_name=label,
+        group=0,
+        update_kinds=_MESSAGE_KINDS,
+        check=command_filter(command, state),
+        callback=callback,
+        label=f"{label}_command",
+        command=command,
+    )
+    logger.info(f"Registered handler: {label}_command (group=0)")
+    return [spec]
+
+
+def _callback_spec(plugin_name: str, pattern: str, callback, label: str) -> list[HandlerSpec]:
+    """Build a group=0 callback query handler spec."""
+    spec = HandlerSpec(
+        plugin_name=plugin_name,
+        group=0,
+        update_kinds=("callback_query",),
+        check=callback_data_pattern(pattern),
+        callback=callback,
+        label=label,
+    )
     logger.info(f"Registered handler: {label} (group=0)")
-    return [handler]
+    return [spec]
 
 
 # --- Individual registrar functions ---
 
-def register_verify(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_verify(state: AppState) -> list[HandlerSpec]:
     """Register /verify command handler."""
-    handler: BaseHandler = CommandHandler("verify", handle_verify_command)
-    return _register(application, handler, "verify_command")
+    return _command_spec(state, "verify", handle_verify_command, "verify")
 
 
-def register_unverify(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_unverify(state: AppState) -> list[HandlerSpec]:
     """Register /unverify command handler."""
-    handler: BaseHandler = CommandHandler("unverify", handle_unverify_command)
-    return _register(application, handler, "unverify_command")
+    return _command_spec(state, "unverify", handle_unverify_command, "unverify")
 
 
-def register_check(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_check(state: AppState) -> list[HandlerSpec]:
     """Register /check command handler."""
-    handler: BaseHandler = CommandHandler("check", handle_check_command)
-    return _register(application, handler, "check_command")
+    return _command_spec(state, "check", handle_check_command, "check")
 
 
-def register_trust(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_trust(state: AppState) -> list[HandlerSpec]:
     """Register /trust command handler."""
-    handler: BaseHandler = CommandHandler("trust", handle_trust_command)
-    return _register(application, handler, "trust_command")
+    return _command_spec(state, "trust", handle_trust_command, "trust")
 
 
-def register_untrust(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_untrust(state: AppState) -> list[HandlerSpec]:
     """Register /untrust command handler."""
-    handler: BaseHandler = CommandHandler("untrust", handle_untrust_command)
-    return _register(application, handler, "untrust_command")
+    return _command_spec(state, "untrust", handle_untrust_command, "untrust")
 
 
-def register_trusted_list(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_trusted_list(state: AppState) -> list[HandlerSpec]:
     """Register /trusted command handler."""
-    handler: BaseHandler = CommandHandler("trusted", handle_trusted_list_command)
-    return _register(application, handler, "trusted_list_command")
+    return _command_spec(state, "trusted", handle_trusted_list_command, "trusted_list")
 
 
-def register_check_forwarded_message(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_check_forwarded_message(state: AppState) -> list[HandlerSpec]:
     """Register forwarded message handler for /check context."""
-    handler: BaseHandler = MessageHandler(
-        filters.FORWARDED & filters.ChatType.PRIVATE,
-        handle_check_forwarded_message,
+    _ = state
+    spec = HandlerSpec(
+        plugin_name="check_forwarded_message",
+        group=0,
+        update_kinds=_MESSAGE_KINDS,
+        check=lambda update: is_private_chat(update) and is_forwarded(update),
+        callback=handle_check_forwarded_message,
+        label="check_forwarded_message",
     )
-    return _register(application, handler, "check_forwarded_message")
+    logger.info("Registered handler: check_forwarded_message (group=0)")
+    return [spec]
 
 
-def register_check_group_callback(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_check_group_callback(state: AppState) -> list[HandlerSpec]:
     """Register group selector callback for /check."""
-    handler: BaseHandler = CallbackQueryHandler(
-        handle_check_group_callback,
-        pattern=r"^checkgrp:-?\d+:\d+$",
+    _ = state
+    return _callback_spec(
+        "check_group_callback", r"^checkgrp:-?\d+:\d+$",
+        handle_check_group_callback, "check_group_callback",
     )
-    return _register(application, handler, "check_group_callback")
 
 
-def register_verify_callback(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_verify_callback(state: AppState) -> list[HandlerSpec]:
     """Register verify callback handler (group-scoped)."""
-    handler: BaseHandler = CallbackQueryHandler(
-        handle_verify_callback,
-        pattern=r"^verify:-?\d+:\d+$",
+    _ = state
+    return _callback_spec(
+        "verify_callback", r"^verify:-?\d+:\d+$",
+        handle_verify_callback, "verify_callback",
     )
-    return _register(application, handler, "verify_callback")
 
 
-def register_unverify_callback(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_unverify_callback(state: AppState) -> list[HandlerSpec]:
     """Register unverify callback handler (group-scoped)."""
-    handler: BaseHandler = CallbackQueryHandler(
-        handle_unverify_callback,
-        pattern=r"^unverify:-?\d+:\d+$",
+    _ = state
+    return _callback_spec(
+        "unverify_callback", r"^unverify:-?\d+:\d+$",
+        handle_unverify_callback, "unverify_callback",
     )
-    return _register(application, handler, "unverify_callback")
 
 
-def register_warn_callback(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_warn_callback(state: AppState) -> list[HandlerSpec]:
     """Register warn callback handler (group-scoped)."""
-    handler: BaseHandler = CallbackQueryHandler(
-        handle_warn_callback,
-        pattern=r"^warn:-?\d+:\d+:",
+    _ = state
+    return _callback_spec(
+        "warn_callback", r"^warn:-?\d+:\d+:",
+        handle_warn_callback, "warn_callback",
     )
-    return _register(application, handler, "warn_callback")
 
 
-def register_trust_callback(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_trust_callback(state: AppState) -> list[HandlerSpec]:
     """Register trust callback handler (group-scoped)."""
-    handler: BaseHandler = CallbackQueryHandler(
-        handle_trust_callback,
-        pattern=r"^trust:-?\d+:\d+$",
+    _ = state
+    return _callback_spec(
+        "trust_callback", r"^trust:-?\d+:\d+$",
+        handle_trust_callback, "trust_callback",
     )
-    return _register(application, handler, "trust_callback")
 
 
-def register_untrust_callback(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_untrust_callback(state: AppState) -> list[HandlerSpec]:
     """Register untrust callback handler (group-scoped)."""
-    handler: BaseHandler = CallbackQueryHandler(
-        handle_untrust_callback,
-        pattern=r"^untrust:-?\d+:\d+$",
+    _ = state
+    return _callback_spec(
+        "untrust_callback", r"^untrust:-?\d+:\d+$",
+        handle_untrust_callback, "untrust_callback",
     )
-    return _register(application, handler, "untrust_callback")
 
 
-def register_unrestrict_callback(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_unrestrict_callback(state: AppState) -> list[HandlerSpec]:
     """Register unrestrict callback handler (group-scoped)."""
-    handler: BaseHandler = CallbackQueryHandler(
-        handle_unrestrict_callback,
-        pattern=r"^unrestrict:-?\d+:\d+$",
+    _ = state
+    return _callback_spec(
+        "unrestrict_callback", r"^unrestrict:-?\d+:\d+$",
+        handle_unrestrict_callback, "unrestrict_callback",
     )
-    return _register(application, handler, "unrestrict_callback")
 
 
-def register_warn_command(application: Application) -> list[BaseHandler]:  # type: ignore[type-arg]
+def register_warn_command(state: AppState) -> list[HandlerSpec]:
     """Register /warn command handler (in-group, admin-issued)."""
-    handler: BaseHandler = CommandHandler("warn", handle_warn_command)
-    return _register(application, handler, "warn_command")
+    return _command_spec(state, "warn", handle_warn_command, "warn_command")

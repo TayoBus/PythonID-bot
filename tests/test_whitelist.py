@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from telegram import Message, MessageEntity
+from aiogram.types import Chat, Message, MessageEntity
 
 from bot.handlers.anti_spam import (
     extract_urls,
@@ -302,11 +302,9 @@ def test_has_story_without_story():
 
 # Tests for extract_urls
 def _make_message(text=None, caption=None, entities=None, caption_entities=None):
-    """Build a real telegram.Message so UTF-16 offsets and entity filtering
+    """Build a real aiogram Message so UTF-16 offsets and entity filtering
     are exercised for real, instead of stubbing parse_entities/parse_caption_entities."""
     from datetime import UTC, datetime
-
-    from telegram import Chat
 
     return Message(
         message_id=1,
@@ -323,7 +321,7 @@ def test_extract_urls_with_url_entities():
     """Test extract_urls extracts inline URLs."""
     url = "https://github.com/"
     message = _make_message(
-        text=url, entities=[MessageEntity(type=MessageEntity.URL, offset=0, length=len(url))]
+        text=url, entities=[MessageEntity(type="url", offset=0, length=len(url))]
     )
     assert extract_urls(message) == [url]
 
@@ -334,7 +332,7 @@ def test_extract_urls_with_text_link_entities():
         text="Click here",
         entities=[
             MessageEntity(
-                type=MessageEntity.TEXT_LINK,
+                type="text_link",
                 offset=0,
                 length=10,
                 url="https://github.com/user/repo",
@@ -349,22 +347,22 @@ def test_extract_urls_from_caption():
     caption = "github.com/"
     message = _make_message(
         caption=caption,
-        caption_entities=[MessageEntity(type=MessageEntity.URL, offset=0, length=len(caption))],
+        caption_entities=[MessageEntity(type="url", offset=0, length=len(caption))],
     )
     assert extract_urls(message) == [caption]
 
 
 def test_extract_urls_mixed_entities():
     """Test extract_urls with mixed URL and non-URL entities; the BOLD
-    entity must be excluded by the [MessageEntity.URL] filter, not just
+    entity must be excluded by the {MessageEntityType.URL} filter, not just
     happen to be absent from a stubbed return value."""
     url = "https://github.com/"
     text = f"{url} bold"
     message = _make_message(
         text=text,
         entities=[
-            MessageEntity(type=MessageEntity.URL, offset=0, length=len(url)),
-            MessageEntity(type=MessageEntity.BOLD, offset=len(url) + 1, length=4),
+            MessageEntity(type="url", offset=0, length=len(url)),
+            MessageEntity(type="bold", offset=len(url) + 1, length=4),
         ],
     )
     assert extract_urls(message) == [url]
@@ -383,8 +381,8 @@ def test_extract_urls_multiple_urls():
     message = _make_message(
         text=text,
         entities=[
-            MessageEntity(type=MessageEntity.URL, offset=0, length=len(url1)),
-            MessageEntity(type=MessageEntity.URL, offset=len(url1) + 1, length=len(url2)),
+            MessageEntity(type="url", offset=0, length=len(url1)),
+            MessageEntity(type="url", offset=len(url1) + 1, length=len(url2)),
         ],
     )
     urls = extract_urls(message)
@@ -398,7 +396,7 @@ def test_has_non_whitelisted_link_with_whitelisted():
     """Test has_non_whitelisted_link returns False for whitelisted URLs."""
     url = "https://github.com/"
     message = _make_message(
-        text=url, entities=[MessageEntity(type=MessageEntity.URL, offset=0, length=len(url))]
+        text=url, entities=[MessageEntity(type="url", offset=0, length=len(url))]
     )
     assert not has_non_whitelisted_link(message)
 
@@ -407,7 +405,7 @@ def test_has_non_whitelisted_link_with_non_whitelisted():
     """Test has_non_whitelisted_link returns True for non-whitelisted URLs."""
     url = "https://malicious-site.com/"
     message = _make_message(
-        text=url, entities=[MessageEntity(type=MessageEntity.URL, offset=0, length=len(url))]
+        text=url, entities=[MessageEntity(type="url", offset=0, length=len(url))]
     )
     assert has_non_whitelisted_link(message)
 
@@ -419,8 +417,8 @@ def test_has_non_whitelisted_link_mixed_urls():
     message = _make_message(
         text=text,
         entities=[
-            MessageEntity(type=MessageEntity.URL, offset=0, length=len(url1)),
-            MessageEntity(type=MessageEntity.URL, offset=len(url1) + 1, length=len(url2)),
+            MessageEntity(type="url", offset=0, length=len(url1)),
+            MessageEntity(type="url", offset=len(url1) + 1, length=len(url2)),
         ],
     )
     assert has_non_whitelisted_link(message)

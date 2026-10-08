@@ -10,8 +10,10 @@ This module enforces anti-spam rules including:
 import logging
 from datetime import UTC, datetime
 
-from telegram import Message, MessageEntity, Update
-from telegram.ext import ApplicationHandlerStop, ContextTypes
+from aiogram.enums import MessageEntityType
+from aiogram.types import Message, MessageEntity, Update
+
+from bot.dispatch import HandlerContext, StopPropagation
 
 from bot.constants import (
     CONTACT_SPAM_NOTIFICATION,
@@ -106,6 +108,28 @@ def has_media(message: Message) -> bool:
     ])
 
 
+def _entity_texts(
+    text: str | None,
+    entities: list[MessageEntity] | None,
+    types: set[str],
+) -> list[str]:
+    """Extract entity text slices using UTF-16 offsets.
+
+    Mirrors PTB ``Message.parse_entities``: Telegram entity offsets are in
+    UTF-16 code units, so slicing must go through a UTF-16 encoding.
+    """
+    if not text or not entities:
+        return []
+    utf16 = text.encode("utf-16-le")
+    out = []
+    for entity in entities:
+        if entity.type in types:
+            start = entity.offset * 2
+            end = (entity.offset + entity.length) * 2
+            out.append(utf16[start:end].decode("utf-16-le"))
+    return out
+
+
 def extract_urls(message: Message) -> list[str]:
     """
     Extract all URLs from a message.
@@ -117,16 +141,15 @@ def extract_urls(message: Message) -> list[str]:
         list[str]: List of URLs found in the message.
     """
     urls = []
-    
-    for entity, text in message.parse_entities([MessageEntity.URL]).items():
-        urls.append(text)
-        
-    for entity, text in message.parse_caption_entities([MessageEntity.URL]).items():
-        urls.append(text)
+
+    urls.extend(_entity_texts(message.text, message.entities, {MessageEntityType.URL}))
+    urls.extend(
+        _entity_texts(message.caption, message.caption_entities, {MessageEntityType.URL})
+    )
 
     entities = list(message.entities or []) + list(message.caption_entities or [])
     for entity in entities:
-        if entity.type == MessageEntity.TEXT_LINK and entity.url:
+        if entity.type == MessageEntityType.TEXT_LINK and entity.url:
             urls.append(entity.url)
 
     return urls
@@ -213,7 +236,7 @@ def has_contact(message: Message) -> bool:
 
 async def _handle_group_spam(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     *,
     detector,
     label: str,
@@ -225,7 +248,7 @@ async def _handle_group_spam(
     Shared helper for handling group spam detection and enforcement.
 
     Implements the common skeleton: guard clauses → detector check → delete
-    message → conditionally restrict → send notification → raise ApplicationHandlerStop.
+    message → conditionally restrict → send notification → raise StopPropagation.
 
     Args:
         update: Telegram update containing the message.
@@ -310,11 +333,11 @@ async def _handle_group_spam(
             exc_info=True,
         )
 
-    raise ApplicationHandlerStop
+    raise StopPropagation
 
 
 async def handle_contact_spam(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle contact card sharing in monitored groups.
@@ -338,7 +361,7 @@ async def handle_contact_spam(
 
 
 async def handle_inline_keyboard_spam(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle spam messages containing inline keyboard buttons with non-whitelisted URLs.
@@ -376,7 +399,7 @@ def _should_skip_new_user_spam_check(update, context, group_config) -> bool:
 
 
 async def handle_new_user_spam(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle potential spam from users on probation.
@@ -529,4 +552,4 @@ async def handle_new_user_spam(
                     exc_info=True,
                 )
 
-    raise ApplicationHandlerStop
+    raise StopPropagation
