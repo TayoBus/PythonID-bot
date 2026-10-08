@@ -622,3 +622,55 @@ class TestStateViewExtras:
         assert "admin_ids" in keys
         assert "custom" in keys
         assert len(ctx.bot_data) == len(keys)
+
+
+class TestDispatchLogging:
+    """Every dispatch path emits a traceable log line (update_id-tagged)."""
+
+    def _state_with(self, specs):
+        state = AppState()
+        state.plugin_handlers = {
+            "p": {"handler_group": 0, "handlers": specs},
+        }
+        return state
+
+    async def test_entry_and_match_logged(self, bot, caplog):
+        import logging
+        calls = []
+        state = self._state_with([_spec("plug", 0, ("message",), _yes, _cb("h", calls))])
+        with caplog.at_level(logging.INFO, logger="bot.dispatch"):
+            await dispatch_update(_make_update(_make_message("/status")), bot, state)
+        text = caplog.text
+        assert "dispatch: update_id=1 kind=message" in text
+        assert "cmd=/status" in text
+        assert "matched handler='plug'" in text
+        assert "completed, first-match-wins" in text
+
+    async def test_unhandled_logged(self, bot, caplog):
+        import logging
+        state = self._state_with([_spec("plug", 0, ("message",), _no, _cb("h", []))])
+        with caplog.at_level(logging.INFO, logger="bot.dispatch"):
+            await dispatch_update(_make_update(), bot, state)
+        assert "dispatch: update_id=1 unhandled by all groups" in caplog.text
+
+    async def test_stop_propagation_logged(self, bot, caplog):
+        import logging
+        calls = []
+        state = self._state_with([_spec("plug", 0, ("message",), _yes, _cb("h", calls, stop=True))])
+        with caplog.at_level(logging.INFO, logger="bot.dispatch"):
+            await dispatch_update(_make_update(), bot, state)
+        assert "StopPropagation raised by 'plug'" in caplog.text
+
+    async def test_unsupported_update_ignored_logged(self, bot, caplog):
+        import logging
+        state = AppState()
+        with caplog.at_level(logging.INFO, logger="bot.dispatch"):
+            await dispatch_update(Update(update_id=9), bot, state)
+        assert "dispatch: update_id=9 ignored (unsupported event type)" in caplog.text
+
+    async def test_no_handlers_registered_logged(self, bot, caplog):
+        import logging
+        state = AppState()
+        with caplog.at_level(logging.INFO, logger="bot.dispatch"):
+            await dispatch_update(_make_update(), bot, state)
+        assert "dispatch: update_id=1 no handlers registered" in caplog.text

@@ -12,7 +12,7 @@ from typing import Literal
 
 import logfire
 from aiogram import Bot, Dispatcher
-from aiogram.types import ErrorEvent, Update
+from aiogram.types import ErrorEvent, TelegramObject, Update
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.config import get_settings
@@ -104,17 +104,17 @@ async def error_handler(event: ErrorEvent) -> None:
     """
     await handle_bot_error(event.update, event.exception)
 
-async def on_shutdown(bot: Bot, state: AppState) -> None:
+async def on_shutdown(bot: Bot, app_state: AppState) -> None:
     """Release shared resources after the bot stops polling."""
     _ = bot
-    if state.scheduler is not None:
-        state.scheduler.shutdown()
+    if app_state.scheduler is not None:
+        app_state.scheduler.shutdown()
         logger.info("on_shutdown: scheduler stopped")
     await close_client()
     logger.info("on_shutdown: classifier HTTP client closed")
 
 
-async def on_startup(bot: Bot, state: AppState) -> None:
+async def on_startup(bot: Bot, app_state: AppState) -> None:
     """
     Startup handler: resolve bot username, start the scheduler, fetch and
     cache group admin IDs.
@@ -127,32 +127,78 @@ async def on_startup(bot: Bot, state: AppState) -> None:
     logger.info("Starting on_startup: resolving bot username, starting scheduler, fetching admin IDs")
 
     me = await bot.get_me()
-    state.bot_username = me.username
+    app_state.bot_username = me.username
     logger.info(f"Bot username resolved: @{me.username}")
 
-    if state.scheduler is not None:
-        state.scheduler.start()
+    if app_state.scheduler is not None:
+        app_state.scheduler.start()
         logger.info("Scheduler started")
 
     registry = get_group_registry()
 
     # Use preload_admin_ids which preserves cache on failures
-    await preload_admin_ids(state)
+    await preload_admin_ids(app_state)
 
     # Record start time for /status uptime
-    state.start_time = time.monotonic()
+    app_state.start_time = time.monotonic()
 
     # Preload trusted users cache
     db = get_database()
     trusted_ids = db.get_trusted_user_ids()
-    state.trusted_user_ids = trusted_ids
+    app_state.trusted_user_ids = trusted_ids
     logger.info(f"Loaded {len(trusted_ids)} trusted user(s) into cache")
 
     # Recover pending captcha verifications for groups with captcha enabled
     has_captcha = any(gc.captcha_enabled for gc in registry.all_groups())
     if has_captcha:
         logger.info("Recovering pending captcha verifications from database")
-        await recover_pending_captchas(state)
+        await recover_pending_captchas(app_state)
+
+
+def build_dispatcher() -> Dispatcher:
+    """Build the aiogram Dispatcher with lifecycle, error, and update wiring.
+
+    The single update entrypoint runs the manual group-ordered dispatch
+    (``dispatch_update``) for every incoming update.
+
+    Two aiogram behaviors shape this wiring — do not "simplify" it:
+
+    1. Never register the entrypoint on ``dp.update()``. ``Dispatcher.__init__``
+       registers its own internal ``_listen_update`` handler there first, and
+       ``TelegramEventObserver.trigger()`` stops at the first matching
+       handler, so a user ``@dp.update()`` handler never runs and every update
+       is logged "not handled". The four concrete sub-observers below have no
+       internal handlers, so the entrypoint is always reached.
+    2. The shared-state kwarg is named ``app_state``, not ``state``.
+       ``FSMContextMiddleware`` (always registered on ``dp.update``) injects
+       its own ``FSMContext`` as ``state`` on update handlers, which would
+       shadow ours.
+    """
+    dp = Dispatcher()
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+    dp.errors.register(error_handler)
+
+    @dp.message()
+    @dp.edited_message()
+    @dp.callback_query()
+    @dp.chat_member()
+    async def _route_update(
+        event: TelegramObject,
+        bot: Bot,
+        app_state: AppState,
+        event_update: Update,
+    ) -> None:
+        # event_update is the full Update (aiogram sets it in _listen_update);
+        # dispatch_update needs the Update wrapper, not the bare event.
+        logger.info(
+            "wiring: received update_id=%s via %s",
+            event_update.update_id,
+            type(event).__name__,
+        )
+        await dispatch_update(event_update, bot, app_state)
+
+    return dp
 
 def main() -> None:
     """
@@ -212,14 +258,7 @@ def main() -> None:
 
     # Wire up the dispatcher: startup/shutdown lifecycle, error handler,
     # and a single update entrypoint that runs the group-ordered dispatch.
-    dp = Dispatcher()
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
-    dp.errors.register(error_handler)
-
-    @dp.update()
-    async def _route_update(update: Update, bot: Bot, state: AppState) -> None:
-        await dispatch_update(update, bot, state)
+    dp = build_dispatcher()
 
     logger.info(f"Starting bot polling for {group_count} group(s)")
     logger.info("All handlers registered successfully")
@@ -227,7 +266,7 @@ def main() -> None:
     asyncio.run(
         dp.start_polling(
             bot,
-            state=state,
+            app_state=state,
             allowed_updates=["message", "edited_message", "callback_query", "chat_member"],
         )
     )
