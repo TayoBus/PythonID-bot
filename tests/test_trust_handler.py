@@ -64,6 +64,7 @@ def mock_update():
 def mock_context():
     bot = MagicMock()
     bot.send_message = AsyncMock()
+    bot.send_rich_message = AsyncMock()
     state = AppState()
     state.admin_ids = [12345]
     state.trusted_user_ids = set()
@@ -342,19 +343,52 @@ class TestTrustCommands:
 
         await handle_trusted_list_command(mock_update, mock_context)
 
-        message = mock_update.message.reply.call_args.args[0]
-        # Per-row order: user display (with optional @username), user id, separator,
-        # admin display (with optional @username), admin id, timestamp.
-        assert (
-            "Alice Trusted (@alice\\_t) (`8001`) — oleh "
-            "Admin One (@admin\\_one) (`12345`)"
-        ) in message
-        assert (
-            "Bob Trusted (`8002`) — oleh "
-            "Admin Two (@admin\\_two) (`54321`)"
-        ) in message
+        # Rich table is the default path; no Markdown fallback on success.
+        mock_context.bot.send_rich_message.assert_called_once()
+        mock_update.message.reply.assert_not_called()
+        rich_html = mock_context.bot.send_rich_message.call_args.kwargs[
+            "rich_message"
+        ].html
+        # Native striped table with the four columns.
+        assert "<table bordered striped>" in rich_html
+        for header in ("User", "User ID", "Added by", "Date"):
+            assert f"<th>{header}</th>" in rich_html
+        # Same data the Markdown list used to show.
+        assert "Alice Trusted" in rich_html
+        assert "alice_t" in rich_html
+        assert "8001" in rich_html
+        assert "Admin One" in rich_html
+        assert "Bob Trusted" in rich_html
+        assert "8002" in rich_html
         # Timestamp present and UTC.
-        assert "UTC" in message
+        assert "UTC" in rich_html
+
+    async def test_trusted_list_command_rich_html_escapes(
+        self, mock_update, mock_context
+    ):
+        """HTML special chars in names must be escaped in the rich table."""
+        import html as html_module
+
+        db = get_database()
+        db.add_trusted_user(
+            TrustedUserData(
+                user_id=8004,
+                trusted_by_admin_id=12345,
+                user_full_name='Eve <b>&"evil"',
+                username="eve<script>",
+                admin_full_name="Admin One",
+                admin_username="admin_one",
+            )
+        )
+
+        await handle_trusted_list_command(mock_update, mock_context)
+
+        rich_html = mock_context.bot.send_rich_message.call_args.kwargs[
+            "rich_message"
+        ].html
+        assert html_module.escape('Eve <b>&"evil"') in rich_html
+        assert html_module.escape("eve<script>") in rich_html
+        assert "<script>" not in rich_html
 
     async def test_trusted_list_command_empty_name_fallback(
         self, mock_update, mock_context
@@ -364,18 +398,55 @@ class TestTrustCommands:
 
         await handle_trusted_list_command(mock_update, mock_context)
 
-        message = mock_update.message.reply.call_args.args[0]
+        rich_html = mock_context.bot.send_rich_message.call_args.kwargs[
+            "rich_message"
+        ].html
         # User-side fallback (pre-cache row, no name in DB).
-        assert "User 8001" in message
+        assert "User 8001" in rich_html
         # Admin-side fallback (pre-cache row, no admin name in DB).
-        assert "User 12345" in message
+        assert "User 12345" in rich_html
 
-    async def test_trusted_list_command_admin_username_markdown_escape(
+    async def test_trusted_list_command_fallback_on_rich_failure(
         self, mock_update, mock_context
     ):
-        """Admin username with MarkdownV1 special chars must be escaped."""
+        """A failed rich send falls back to the Markdown bullet list."""
+        mock_context.bot.send_rich_message = AsyncMock(
+            side_effect=Exception("rich unsupported")
+        )
+        db = get_database()
+        db.add_trusted_user(
+            TrustedUserData(
+                user_id=8001,
+                trusted_by_admin_id=12345,
+                user_full_name="Alice Trusted",
+                username="alice_t",
+                admin_full_name="Admin One",
+                admin_username="admin_one",
+            )
+        )
+
+        await handle_trusted_list_command(mock_update, mock_context)
+
+        mock_update.message.reply.assert_called_once()
+        reply_args = mock_update.message.reply.call_args
+        message = reply_args.args[0]
+        # Same bullet-list content as before the rich migration.
+        assert (
+            "Alice Trusted (@alice\\_t) (`8001`) — oleh "
+            "Admin One (@admin\\_one) (`12345`)"
+        ) in message
+        assert "UTC" in message
+        assert reply_args.kwargs.get("parse_mode") == "Markdown"
+
+    async def test_trusted_list_command_fallback_markdown_escape(
+        self, mock_update, mock_context
+    ):
+        """MarkdownV1 special chars must still be escaped on the fallback path."""
         from bot.services.markdown import escape_markdown
 
+        mock_context.bot.send_rich_message = AsyncMock(
+            side_effect=Exception("rich unsupported")
+        )
         db = get_database()
         db.add_trusted_user(
             TrustedUserData(

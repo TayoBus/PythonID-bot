@@ -291,6 +291,11 @@ TRUST_LIST_EMPTY_MESSAGE = "ℹ️ Trusted list masih kosong."
 
 TRUST_LIST_HEADER = "📋 Trusted Users:\n{trusted_lines}"
 
+# Rich-message (Bot API 10.1+) rendering of /trusted for DM admins.
+# Same data as TRUST_LIST_HEADER, shown as a native striped table.
+TRUST_LIST_RICH_HEADING = "📋 Trusted Users"
+TRUST_LIST_RICH_COLUMNS = ("User", "User ID", "Added by", "Date")
+
 TRUST_DM_ONLY_MESSAGE = (
     "❌ Perintah ini hanya bisa digunakan di chat pribadi dengan bot."
 )
