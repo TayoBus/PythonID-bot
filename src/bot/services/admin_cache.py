@@ -15,15 +15,15 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from aiogram.exceptions import TelegramAPIError
 from pydantic import ValidationError
-from telegram.error import TelegramError
 
 from bot.config import get_settings
 from bot.group_config import get_group_registry
 from bot.services.telegram_utils import TelegramAdminFetchError, fetch_group_admin_ids
 
 if TYPE_CHECKING:
-    from telegram.ext import ContextTypes
+    from bot.dispatch import AppState
 
 logger = logging.getLogger(__name__)
 
@@ -58,9 +58,10 @@ def _cache_file_path() -> Path:
 
 
 # Network/API errors the fetch path can recover from by falling back to cache.
-# TelegramError covers all PTB errors (TimedOut, NetworkError, RetryAfter, ...)
-# while still letting programming errors propagate.
-FETCH_ERRORS = (TelegramAdminFetchError, TelegramError)
+# TelegramAPIError covers all aiogram API errors (bad request, forbidden,
+# retry-after, network failures, ...) while still letting programming
+# errors propagate.
+FETCH_ERRORS = (TelegramAdminFetchError, TelegramAPIError)
 
 
 def _load_admin_cache() -> dict[int, list[int]]:
@@ -119,22 +120,20 @@ async def _fetch_single(
 
 
 async def _sync_admin_ids(
-    context: ContextTypes.DEFAULT_TYPE, *, seed_existing: bool
+    state: AppState, *, seed_existing: bool
 ) -> None:
     """
     Sync admin IDs for all monitored groups with fallback to cached data.
 
     Args:
-        context: Bot context.
-        seed_existing: If True, seed the dict from existing bot_data cache;
+        state: Shared application state (bot + admin caches).
+        seed_existing: If True, seed the dict from existing state cache;
                       if False, start with an empty dict.
     """
     registry = get_group_registry()
-    old_cache: dict[int, list[int]] = dict(
-        context.bot_data.get("group_admin_ids", {})
-    )
+    old_cache: dict[int, list[int]] = dict(state.group_admin_ids)
 
-    # Disk is the fallback for groups that are missing from bot_data, which
+    # Disk is the fallback for groups that are missing from state, which
     # happens on a cold start and after a cycle where every fetch failed.
     if not old_cache:
         old_cache = await asyncio.to_thread(_load_admin_cache)
@@ -142,7 +141,7 @@ async def _sync_admin_ids(
     group_admin_ids: dict[int, list[int]] = dict(old_cache) if seed_existing else {}
     fetched_any = False
 
-    tasks = [_fetch_single(context.bot, gc.group_id) for gc in registry.all_groups()]
+    tasks = [_fetch_single(state.bot, gc.group_id) for gc in registry.all_groups()]
 
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -164,8 +163,8 @@ async def _sync_admin_ids(
         admin_id for ids in group_admin_ids.values() for admin_id in ids
     }
 
-    context.bot_data["group_admin_ids"] = group_admin_ids
-    context.bot_data["admin_ids"] = list(all_admin_ids)
+    state.group_admin_ids = group_admin_ids
+    state.admin_ids = list(all_admin_ids)
 
     # Never persist a result built without a single successful fetch: doing so
     # would overwrite a good roster on disk with fallback or empty data.
@@ -173,34 +172,34 @@ async def _sync_admin_ids(
         await asyncio.to_thread(_save_admin_cache, group_admin_ids)
 
 
-async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def refresh_admin_ids(state: AppState) -> None:
     """
     Periodically refresh cached admin IDs for all monitored groups.
 
-    Called by JobQueue every 10 minutes to keep admin rosters up to date
-    when promotions/demotions happen after startup.
+    Called by the scheduler every 10 minutes to keep admin rosters up to
+    date when promotions/demotions happen after startup.
     """
-    await _sync_admin_ids(context, seed_existing=False)
-    group_admin_ids = context.bot_data.get("group_admin_ids", {})
-    all_admin_ids = context.bot_data.get("admin_ids", [])
+    await _sync_admin_ids(state, seed_existing=False)
+    group_admin_ids = state.group_admin_ids
+    all_admin_ids = state.admin_ids
     logger.info(
         f"Refreshed admin IDs: {len(all_admin_ids)} unique admin(s) across {len(group_admin_ids)} group(s)"
     )
-    context.bot_data["last_admin_refresh"] = time.time()
+    state.data["last_admin_refresh"] = time.time()
 
 
-async def preload_admin_ids(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def preload_admin_ids(state: AppState) -> None:
     """
     Preload admin IDs at startup with fallback to existing cache.
 
     Unlike ``refresh_admin_ids`` which builds from scratch each cycle,
     this function preserves existing cached data for groups that fail
-    to fetch.  Used in ``post_init`` to prevent wiping admin cache on
-    startup failures.
+    to fetch.  Used in the startup handler to prevent wiping admin cache
+    on startup failures.
     """
-    await _sync_admin_ids(context, seed_existing=True)
-    group_admin_ids = context.bot_data.get("group_admin_ids", {})
-    all_admin_ids = context.bot_data.get("admin_ids", [])
+    await _sync_admin_ids(state, seed_existing=True)
+    group_admin_ids = state.group_admin_ids
+    all_admin_ids = state.admin_ids
     logger.info(
         f"Preloaded admin IDs: {len(all_admin_ids)} unique admin(s) "
         f"across {len(group_admin_ids)} group(s)"

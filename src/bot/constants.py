@@ -5,7 +5,7 @@ This module contains shared constants used across multiple bot modules,
 including permissions, message templates, and formatting utilities.
 """
 
-from telegram import ChatPermissions
+from aiogram.types import ChatPermissions
 
 # Permissions applied when restricting a user (effectively mutes them)
 RESTRICTED_PERMISSIONS = ChatPermissions(

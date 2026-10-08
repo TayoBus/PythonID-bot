@@ -10,21 +10,22 @@ duplicate_spam (4), bio_bait_spam (5), profile_monitor (6), jobs (6).
 
 Usage inside ``main.py``::
 
+    state = AppState(bot=bot, scheduler=scheduler)
     pm = PluginManager()
-    plugin_handlers = pm.register_all(application)
-    # plugin_handlers dict stored in application.bot_data["plugin_handlers"]
+    plugin_handlers = pm.register_all(state)
+    # plugin_handlers dict stored in state.plugin_handlers
 
     # After init_group_registry:
-    pm.compute_effective_map(settings, get_group_registry(), application)
-    # Per-group toggles stored in application.bot_data["plugin_effective_map"]
+    pm.compute_effective_map(settings, get_group_registry(), state)
+    # Per-group toggles stored in state.plugin_effective_map
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
+from bot.dispatch import AppState, HandlerSpec
 from bot.plugins.builtin import ai_monitor as ai_mod
 from bot.plugins.builtin import captcha as captcha_mod
 from bot.plugins.builtin import commands
@@ -37,15 +38,12 @@ from bot.plugins.builtin import topic_guard as tg_mod
 from bot.plugins.config import resolve_plugin_toggles
 from bot.plugins.definitions import MANIFEST_ORDER, get_plugin_definitions
 
-if TYPE_CHECKING:
-    from telegram.ext import Application, BaseHandler
-
 logger = logging.getLogger(__name__)
 
 # Type alias for a registrar callable.
-# Accepts an Application, returns a list of registered BaseHandler instances.
-# Use string forward ref because BaseHandler is only imported under TYPE_CHECKING.
-Registrar = Callable[..., list["BaseHandler"]]
+# Accepts the shared AppState, returns a list of HandlerSpec instances
+# (empty for job plugins, which schedule APScheduler jobs instead).
+Registrar = Callable[[AppState], list[HandlerSpec]]
 
 # Module-level registry constant mapping plugin names to registrar functions.
 _REGISTRY: dict[str, Registrar] = {
@@ -128,9 +126,8 @@ class PluginManager:
     to its individual registrar function. ``register_all()`` iterates
     ``MANIFEST_ORDER`` and invokes each registrar in order.
 
-    After registration, metadata (handler group, handler instances) is
-    stored in ``application.bot_data["plugin_handlers"]`` for later
-    gating (e.g., Task 5 selective disable).
+    After registration, metadata (handler group, handler specs) is
+    stored in ``state.plugin_handlers`` for later gating.
     """
 
     def __init__(self) -> None:
@@ -139,24 +136,26 @@ class PluginManager:
 
     def register_all(
         self,
-        application: Application,  # type: ignore[type-arg]
-    ) -> dict[str, list[BaseHandler]]:
+        state: AppState,
+    ) -> dict[str, list[HandlerSpec]]:
         """Register all built-in plugins in MANIFEST_ORDER.
 
         Args:
-            application: PTB Application instance.
+            state: Shared application state; registrars append handler
+                specs (or schedule jobs) against it.
 
         Returns:
-            Dict mapping each plugin name to the list of handler instances
+            Dict mapping each plugin name to the list of handler specs
             returned by its registrar. Also stored in
-            ``application.bot_data["plugin_handlers"]``.
+            ``state.plugin_handlers`` as ``{name: {"handler_group": int,
+            "handlers": [...]}}``.
         """
-        result: dict[str, list[BaseHandler]] = {}
+        result: dict[str, list[HandlerSpec]] = {}
         defs_by_name = {d["name"]: d for d in get_plugin_definitions()}
 
         for name in MANIFEST_ORDER:
             registrar = self._registry[name]
-            handlers = registrar(application)
+            handlers = registrar(state)
             result[name] = handlers
             noun = "job(s)" if name.endswith("_job") else "handler(s)"
             group = defs_by_name[name]["handler_group"]
@@ -171,7 +170,7 @@ class PluginManager:
                 "handler_group": defs_by_name[name]["handler_group"],  # type: ignore[arg-type]
                 "handlers": result[name],
             }
-        application.bot_data["plugin_handlers"] = metadata  # type: ignore[index]
+        state.plugin_handlers = metadata
 
         return result
 
@@ -179,26 +178,25 @@ class PluginManager:
         self,
         settings: object,
         registry: object,
-        application: Application,  # type: ignore[type-arg]
+        state: AppState,
     ) -> dict[int, dict[str, bool]]:
         """Compute and store per-group effective plugin toggle map.
 
         Resolves plugin enabled/disabled state for every group in the
-        registry and stores the result in
-        ``application.bot_data["plugin_effective_map"]``.
+        registry and stores the result in ``state.plugin_effective_map``.
 
         Args:
             settings: Application Settings instance (must have
                 ``plugins_default`` attribute).
             registry: GroupRegistry instance.
-            application: PTB Application instance.
+            state: Shared application state.
 
         Returns:
             Dict mapping group_id -> resolved toggle dict. Also stored
-            in ``bot_data["plugin_effective_map"]``.
+            in ``state.plugin_effective_map``.
         """
         plugins_default = getattr(settings, "plugins_default", {})
         effective_map = compute_effective_plugin_map(plugins_default, registry)
-        application.bot_data["plugin_effective_map"] = effective_map  # type: ignore[index]
+        state.plugin_effective_map = effective_map
         logger.info(f"Computed effective plugin map for {len(effective_map)} group(s)")
         return effective_map

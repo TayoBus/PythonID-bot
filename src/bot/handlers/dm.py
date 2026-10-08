@@ -16,9 +16,10 @@ the global settings fallback.
 
 import logging
 
-from telegram import Update
-from telegram.constants import ChatMemberStatus
-from telegram.ext import ContextTypes
+from aiogram.enums import ChatMemberStatus
+from aiogram.types import Update
+
+from bot.dispatch import HandlerContext, effective_chat
 
 from bot.constants import (
     CAPTCHA_PENDING_DM_GROUP_LINE,
@@ -72,7 +73,7 @@ def _parse_deep_link_payload(text: str) -> int | None:
 
 
 async def _unrestrict_in_groups(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     user,
     restricted_groups: list,
 ) -> int:
@@ -130,7 +131,7 @@ async def _unrestrict_in_groups(
     return success_count
 
 
-async def handle_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_dm(update: Update, context: HandlerContext) -> None:
     """
     Handle direct messages to the bot for unrestriction flow.
 
@@ -153,8 +154,9 @@ async def handle_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("Skipping DM handler - no message or sender")
         return
 
-    if update.effective_chat and update.effective_chat.type != "private":
-        logger.info(f"Skipping non-private chat type: {update.effective_chat.type}")
+    chat = effective_chat(update)
+    if chat and chat.type != "private":
+        logger.info(f"Skipping non-private chat type: {chat.type}")
         return
 
     user = update.message.from_user
@@ -178,12 +180,12 @@ async def handle_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 exc_info=True,
             )
             continue
-        if user_status is not None and user_status not in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+        if user_status is not None and user_status not in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED):
             member_groups.append((gc, user_status))
 
     # User not in any monitored group
     if not member_groups:
-        await update.message.reply_text(DM_NOT_IN_GROUP_MESSAGE)
+        await update.message.reply(DM_NOT_IN_GROUP_MESSAGE)
         logger.info(f"DM from user {user.id} ({user.full_name}) - not in any monitored group")
         return
 
@@ -198,7 +200,7 @@ async def handle_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         group_lines = "\n".join(
             CAPTCHA_PENDING_DM_GROUP_LINE.format(group_id=gid) for gid in pending_groups
         )
-        await update.message.reply_text(
+        await update.message.reply(
             CAPTCHA_PENDING_DM_MESSAGE.format(group_list=group_lines)
         )
         logger.info(
@@ -228,7 +230,7 @@ async def handle_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             missing_text=missing_text,
             rules_link=rules_link,
         )
-        await update.message.reply_text(reply_message, parse_mode="Markdown")
+        await update.message.reply(reply_message, parse_mode="Markdown")
         logger.info(
             f"DM from user {user.id} ({user.full_name}) - missing: {missing_text}"
         )
@@ -243,7 +245,7 @@ async def handle_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     # User not restricted by bot in any group
     if not restricted_groups:
-        await update.message.reply_text(DM_NO_RESTRICTION_MESSAGE)
+        await update.message.reply(DM_NO_RESTRICTION_MESSAGE)
         logger.info(
             f"DM from user {user.id} ({user.full_name}) - no bot restriction in any group"
         )
@@ -254,11 +256,11 @@ async def handle_dm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     success_count = await _unrestrict_in_groups(context, user, restricted_groups)
 
     if success_count > 0:
-        await update.message.reply_text(DM_UNRESTRICTION_SUCCESS_MESSAGE)
+        await update.message.reply(DM_UNRESTRICTION_SUCCESS_MESSAGE)
     elif not had_any_restricted:
-        await update.message.reply_text(DM_ALREADY_UNRESTRICTED_MESSAGE)
+        await update.message.reply(DM_ALREADY_UNRESTRICTED_MESSAGE)
     else:
         logger.error(f"Failed to unrestrict user {user.id} in any group")
-        await update.message.reply_text(
+        await update.message.reply(
             "❌ Gagal membuka pembatasan. Silakan hubungi admin grup."
         )

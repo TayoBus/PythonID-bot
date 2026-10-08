@@ -21,9 +21,10 @@ Non-admin callers are silently ignored.
 
 import logging
 
-from telegram import Update
-from telegram.ext import ContextTypes
-from telegram.helpers import escape_markdown
+from aiogram.types import Update
+
+from bot.dispatch import HandlerContext
+from bot.services.markdown import escape_markdown
 
 from bot.constants import (
     WARN_COMMAND_NO_REASON,
@@ -60,7 +61,7 @@ def _is_real_reply(message: object) -> bool:
 
 
 async def handle_warn_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle /warn command in a monitored group.
@@ -109,18 +110,14 @@ async def handle_warn_command(
                 exc_info=True,
             )
             try:
-                await message.reply_text(
-                    WARN_COMMAND_NOT_FOUND.format(user_id=target_user_id),
-                    do_quote=False,
-                )
+                await message.answer(WARN_COMMAND_NOT_FOUND.format(user_id=target_user_id))
             except Exception:
                 logger.error("Failed to send error reply", exc_info=True)
             return
         if member.status in ("left", "kicked"):
             try:
-                await message.reply_text(
+                await message.answer(
                     WARN_COMMAND_NOT_MEMBER.format(user_id=target_user_id),
-                    do_quote=False,
                 )
             except Exception:
                 logger.error("Failed to send not-member reply", exc_info=True)
@@ -138,7 +135,7 @@ async def handle_warn_command(
         reason = " ".join(args) if args else ""
     else:
         try:
-            await message.reply_text(WARN_COMMAND_USAGE, do_quote=False)
+            await message.answer(WARN_COMMAND_USAGE)
         except Exception:
             logger.error("Failed to send usage message", exc_info=True)
         return

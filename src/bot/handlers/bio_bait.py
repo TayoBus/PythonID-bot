@@ -24,9 +24,14 @@ import re
 import unicodedata
 from time import monotonic
 
-from telegram import Update
-from telegram.ext import ApplicationHandlerStop, ContextTypes
-from telegram.ext import filters as _filters
+from aiogram.types import Update
+
+from bot.dispatch import (
+    HandlerContext,
+    StopPropagation,
+    is_command_message,
+    is_group_chat,
+)
 
 from bot.constants import (
     BIO_BAIT_MONITOR_ALERT,
@@ -46,10 +51,15 @@ from bot.services.telegram_utils import (
     send_message_with_retry,
 )
 
-# Filter for bio-bait handler registration in main.py.
+# Filter predicate for bio-bait handler registration.
 # Must NOT restrict to TEXT|CAPTION so non-text messages (e.g. photos
 # without caption) reach the handler for bio-link detection.
-BIO_BAIT_FILTER = _filters.ChatType.GROUPS & ~_filters.COMMAND
+def bio_bait_filter(update: Update) -> bool:
+    """Match group/supergroup messages that are not commands."""
+    return is_group_chat(update) and not is_command_message(update)
+
+
+BIO_BAIT_FILTER = bio_bait_filter
 
 
 logger = logging.getLogger(__name__)
@@ -57,7 +67,7 @@ logger = logging.getLogger(__name__)
 # Maximum normalized text length to consider as bait. Real bait is short.
 BIO_BAIT_MAX_LENGTH = 80
 
-# Per-user bio cache (TTL in seconds). Stored in context.bot_data.
+# Per-user bio cache (TTL in seconds). Stored in state.data.
 USER_BIO_CACHE_KEY = "user_bio_cache"
 USER_BIO_CACHE_TTL_SECONDS = 3600
 USER_BIO_CACHE_MAX_SIZE = 2000
@@ -228,13 +238,13 @@ def has_suspicious_bio_links(bio: str) -> bool:
     return bool(mention_count == 1 and _BIO_PROMO_HINTS_RE.search(lowered))
 
 def _get_user_bio_cache(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
 ) -> dict[int, tuple[float, str | None]]:
-    """Get or initialize the per-user bio cache stored in bot_data."""
-    return context.bot_data.setdefault(USER_BIO_CACHE_KEY, {})
+    """Get or initialize the per-user bio cache stored in state.data."""
+    return context.state.data.setdefault(USER_BIO_CACHE_KEY, {})
 
 def clear_cached_user_bio(
-    context: ContextTypes.DEFAULT_TYPE, user_id: int
+    context: HandlerContext, user_id: int
 ) -> None:
     """Remove a user's bio cache entry (call after restriction)."""
     _get_user_bio_cache(context).pop(user_id, None)
@@ -249,7 +259,7 @@ def _chunk_telegram_text(text: str, max_length: int = MAX_TELEGRAM_MESSAGE_LENGT
 
 
 async def send_monitor_alert_to_owner(
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     alert_chat_id: int,
     group_id: int,
     user_id: int,
@@ -288,7 +298,7 @@ async def send_monitor_alert_to_owner(
 
 
 async def get_cached_user_bio(
-    context: ContextTypes.DEFAULT_TYPE, user_id: int
+    context: HandlerContext, user_id: int
 ) -> str | None:
     """
     Fetch the user's profile bio with a per-user TTL cache.
@@ -326,12 +336,12 @@ async def get_cached_user_bio(
 
 async def _enforce_bio_bait_restriction(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     group_config,
     user,
     detection_reason: str,
 ) -> None:
-    """Delete, restrict, notify for confirmed bio bait spam. Caller raises ApplicationHandlerStop."""
+    """Delete, restrict, notify for confirmed bio bait spam. Caller raises StopPropagation."""
     message = update.message or update.edited_message
     user_mention = get_user_mention(user)
 
@@ -383,14 +393,14 @@ async def _enforce_bio_bait_restriction(
 
 
 async def handle_bio_bait_spam(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle bio-bait spam (phrase in message OR promo links in user's bio).
 
     Skips bots and admins. In enforcement mode, deletes the message,
     restricts the user, notifies the warning topic, and raises
-    ApplicationHandlerStop. In monitor-only mode, only records metrics and
+    StopPropagation. In monitor-only mode, only records metrics and
     optionally sends owner alerts without affecting user message flow.
 
     Args:
@@ -464,4 +474,4 @@ async def handle_bio_bait_spam(
         return
 
     await _enforce_bio_bait_restriction(update, context, group_config, user, detection_reason)
-    raise ApplicationHandlerStop
+    raise StopPropagation

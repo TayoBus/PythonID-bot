@@ -7,14 +7,19 @@ Telegram's API across different handlers and services.
 
 import asyncio
 import logging
-from datetime import timedelta
 from urllib.parse import urlparse
 
-from telegram import Bot, Chat, Message, Update, User
-from telegram.constants import ChatMemberStatus
-from telegram.error import BadRequest, Forbidden, RetryAfter
-from telegram.ext import ContextTypes
-from telegram.helpers import escape_markdown, mention_markdown
+from aiogram import Bot
+from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
+from aiogram.types import CallbackQuery, Chat, Message, Update, User
+
+from bot.dispatch import AppState, HandlerContext, effective_chat
+from bot.services.markdown import escape_markdown, mention_markdown
 
 from bot.constants import WHITELISTED_TELEGRAM_PATHS, WHITELISTED_URL_DOMAINS
 from bot.database.service import get_database
@@ -90,7 +95,7 @@ async def get_user_status(
             user_id=user_id,
         )
         return user_member.status
-    except (BadRequest, Forbidden) as e:
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
         logger.error(
             f"Failed to get user status for user_id={user_id}, group_id={group_id}: {e}",
             exc_info=True,
@@ -114,7 +119,7 @@ async def unrestrict_user(
         user_id: Telegram user ID to unrestrict.
 
     Raises:
-        BadRequest: If user not found or bot lacks permissions.
+        TelegramBadRequest: If user not found or bot lacks permissions.
     """
     logger.info(f"Unrestricting user_id={user_id} in group_id={group_id}")
     try:
@@ -130,7 +135,7 @@ async def unrestrict_user(
             permissions=default_permissions,
         )
         if not ok:
-            raise RuntimeError("Final RetryAfter exceeded on restrict_chat_member")
+            raise RuntimeError("Final retry-after exceeded on restrict_chat_member")
     except Exception as e:
         logger.error(
             f"Failed to unrestrict user_id={user_id} in group_id={group_id}: {e}",
@@ -211,22 +216,22 @@ def is_url_whitelisted(url: str) -> bool:
     except Exception:
         return False
 
-def _get_trusted_ids(bot_data: dict) -> set[int]:
+def _get_trusted_ids(state: AppState) -> set[int]:
     """
-    Return the cached set of trusted user IDs from ``bot_data``.
+    Return the cached set of trusted user IDs from app state.
 
-    If the ``"trusted_user_ids"`` key is missing entirely (``None``), perform a
-    one-time lazy load via :func:`get_database`. If the database is not yet
+    If ``trusted_user_ids`` is None (not yet loaded), perform a one-time
+    lazy load via :func:`get_database`. If the database is not yet
     initialised (``RuntimeError``), cache an empty set so the lookup is not
     retried on every call.
 
     Args:
-        bot_data: The application's ``bot_data`` mapping.
+        state: The application's shared state.
 
     Returns:
         set[int]: The cached trusted user ID set (possibly empty).
     """
-    trusted_ids = bot_data.get("trusted_user_ids")
+    trusted_ids = state.trusted_user_ids
     if trusted_ids is not None:
         return trusted_ids
 
@@ -234,37 +239,37 @@ def _get_trusted_ids(bot_data: dict) -> set[int]:
         loaded = set(get_database().get_trusted_user_ids())
     except RuntimeError:
         loaded = set()
-    bot_data["trusted_user_ids"] = loaded
+    state.trusted_user_ids = loaded
     return loaded
 
-def is_user_admin_or_trusted(context: object, group_id: int, user_id: int) -> bool:
+def is_user_admin_or_trusted(context: HandlerContext, group_id: int, user_id: int) -> bool:
     """
     Check whether a user is an admin or trusted user for bypass decisions.
 
     Reads exclusively from in-memory caches (``group_admin_ids`` and
-    ``trusted_user_ids`` stored on ``context.bot_data``). The trusted-user
+    ``trusted_user_ids`` stored on ``context.state``). The trusted-user
     cache is lazily initialised once if missing; no database call happens on
     the hot path beyond that initial load.
 
     Args:
-        context: Telegram callback context.
+        context: Handler context with shared app state.
         group_id: Telegram group ID.
         user_id: Telegram user ID.
 
     Returns:
         bool: True if user should bypass spam checks.
     """
-    bot_data = getattr(context, "bot_data", {})
+    state = context.state
 
-    admin_ids = bot_data.get("group_admin_ids", {}).get(group_id, [])
+    admin_ids = state.group_admin_ids.get(group_id, [])
     if user_id in admin_ids:
         return True
 
-    trusted_ids = _get_trusted_ids(bot_data)
+    trusted_ids = _get_trusted_ids(state)
     return user_id in trusted_ids
 
 
-def is_user_admin_in_group(context: object, group_id: int, user_id: int) -> bool:
+def is_user_admin_in_group(context: HandlerContext, group_id: int, user_id: int) -> bool:
     """
     Check whether a user is a human admin of a specific group.
 
@@ -274,47 +279,45 @@ def is_user_admin_in_group(context: object, group_id: int, user_id: int) -> bool
     not appropriate.
 
     Args:
-        context: Telegram context with ``bot_data``.
+        context: Handler context with shared app state.
         group_id: Telegram group ID.
         user_id: Telegram user ID.
 
     Returns:
         bool: True if the user is an admin of the given group.
     """
-    bot_data = getattr(context, "bot_data", {})
-    admin_ids = bot_data.get("group_admin_ids", {}).get(group_id, [])
+    admin_ids = context.state.group_admin_ids.get(group_id, [])
     return user_id in admin_ids
 
 
-def get_admin_groups(context: object, user_id: int) -> list[int]:
+def get_admin_groups(context: HandlerContext, user_id: int) -> list[int]:
     """
     Return the list of group IDs where the given user is an admin.
 
-    Uses the per-group admin cache in ``bot_data["group_admin_ids"]``.
+    Uses the per-group admin cache in ``state.group_admin_ids``.
     Useful for determining which groups an admin can act on.
 
     Args:
-        context: Telegram context with ``bot_data``.
+        context: Handler context with shared app state.
         user_id: Telegram user ID.
 
     Returns:
         list[int]: Group IDs where the user is an admin (may be empty).
     """
-    bot_data = getattr(context, "bot_data", {})
-    group_admin_ids: dict[int, list[int]] = bot_data.get("group_admin_ids", {})
+    group_admin_ids: dict[int, list[int]] = context.state.group_admin_ids
     return [
         gid for gid, ids in group_admin_ids.items() if user_id in ids
     ]
 
-def _retry_after_seconds(e: RetryAfter) -> float:
-    """Extract RetryAfter.retry_after as seconds (handles int and timedelta)."""
-    return e.retry_after.total_seconds() if isinstance(e.retry_after, timedelta) else e.retry_after
+def _retry_after_seconds(e: TelegramRetryAfter) -> float:
+    """Extract TelegramRetryAfter.retry_after as seconds (always an int in aiogram)."""
+    return float(e.retry_after)
 
 
 _MAX_RETRY_SLEEP_SECONDS = 30.0
 
 
-def _clamped_retry_seconds(e: RetryAfter) -> float:
+def _clamped_retry_seconds(e: TelegramRetryAfter) -> float:
     """RetryAfter sleep capped at ``_MAX_RETRY_SLEEP_SECONDS`` so one bad
     flood-control response can't stall a per-group loop for a minute-plus."""
     return min(_retry_after_seconds(e) + 1, _MAX_RETRY_SLEEP_SECONDS)
@@ -322,12 +325,13 @@ def _clamped_retry_seconds(e: RetryAfter) -> float:
 
 async def send_message_with_retry(bot: Bot, *, chat_id: int, **kwargs: object) -> bool:
     """
-    Send a message with one retry on RetryAfter (HTTP 429 / flood control).
+    Send a message with one retry on TelegramRetryAfter (HTTP 429 / flood control).
 
-    Catches ``telegram.error.RetryAfter``, sleeps ``e.retry_after + 1`` seconds,
-    and retries exactly once. On a second RetryAfter it returns ``False``
-    (the error is logged). All other exceptions re-raise so the caller's
-    existing ``except Exception`` still catches them.
+    Catches ``aiogram.exceptions.TelegramRetryAfter``, sleeps
+    ``e.retry_after + 1`` seconds, and retries exactly once. On a second
+    retry-after it returns ``False`` (the error is logged). All other
+    exceptions re-raise so the caller's existing ``except Exception``
+    still catches them.
 
     Args:
         bot: Telegram Bot instance.
@@ -336,12 +340,12 @@ async def send_message_with_retry(bot: Bot, *, chat_id: int, **kwargs: object) -
 
     Returns:
         bool: ``True`` if the message was sent successfully, ``False`` if a
-        second consecutive RetryAfter was encountered.
+        second consecutive retry-after was encountered.
     """
     try:
         await bot.send_message(chat_id=chat_id, **kwargs)
         return True
-    except RetryAfter as e:
+    except TelegramRetryAfter as e:
         wait_seconds = int(_retry_after_seconds(e))
         logger.warning(
             f"RetryAfter on send_message to chat {chat_id}, sleeping {wait_seconds}s before retry"
@@ -350,7 +354,7 @@ async def send_message_with_retry(bot: Bot, *, chat_id: int, **kwargs: object) -
         try:
             await bot.send_message(chat_id=chat_id, **kwargs)
             return True
-        except RetryAfter:
+        except TelegramRetryAfter:
             logger.error(
                 f"RetryAfter again on send_message to chat {chat_id}, giving up"
             )
@@ -365,7 +369,7 @@ async def restrict_chat_member_with_retry(
 
     Same retry strategy as :func:`send_message_with_retry` but wraps
     ``bot.restrict_chat_member``. Returns ``True`` on success, ``False`` after a
-    second consecutive RetryAfter. Other exceptions re-raise.
+    second consecutive retry-after. Other exceptions re-raise.
 
     Args:
         bot: Telegram Bot instance.
@@ -382,7 +386,7 @@ async def restrict_chat_member_with_retry(
             chat_id=chat_id, user_id=user_id, permissions=permissions, **kwargs
         )
         return True
-    except RetryAfter as e:
+    except TelegramRetryAfter as e:
         wait_seconds = int(_retry_after_seconds(e))
         logger.warning(
             f"RetryAfter on restrict_chat_member to chat {chat_id} (user {user_id}), sleeping {wait_seconds}s"
@@ -393,7 +397,7 @@ async def restrict_chat_member_with_retry(
                 chat_id=chat_id, user_id=user_id, permissions=permissions, **kwargs
             )
             return True
-        except RetryAfter:
+        except TelegramRetryAfter:
             logger.error(
                 f"RetryAfter again on restrict_chat_member to chat {chat_id} (user {user_id}), giving up"
             )
@@ -423,16 +427,38 @@ async def fetch_group_admin_ids(bot: Bot, group_id: int) -> list[int]:
         admin_ids = [admin.user.id for admin in admins if not admin.user.is_bot]
         logger.info(f"Fetched {len(admin_ids)} human admins from group_id={group_id}")
         return admin_ids
-    except (BadRequest, Forbidden) as e:
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
         logger.error(
             f"Failed to fetch admins from group_id={group_id}: {e}",
             exc_info=True,
         )
         raise TelegramAdminFetchError(f"Failed to fetch admins from group {group_id}: {e}") from e
 
+async def edit_callback_message(query: CallbackQuery, text: str, **kwargs: object) -> None:
+    """Edit the message attached to a callback query.
+
+    aiogram's ``CallbackQuery`` has no ``edit_message_text`` (PTB did), so
+    edit through the attached message, falling back to ``inline_message_id``
+    when there is no attached message.
+
+    Args:
+        query: Callback query whose message should be edited.
+        text: New message text.
+        **kwargs: Extra keyword arguments forwarded to ``edit_text``.
+    """
+    if query.message is not None:
+        await query.message.edit_text(text, **kwargs)
+        return
+    bot = query.bot
+    if bot is not None and query.inline_message_id:
+        await bot.edit_message_text(
+            inline_message_id=query.inline_message_id, text=text, **kwargs
+        )
+
+
 async def require_admin_dm_target(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     usage_message: str,
     command_label: str,
 ) -> int | None:
@@ -461,31 +487,32 @@ async def require_admin_dm_target(
         return None
 
     admin_user_id = update.message.from_user.id
-    admin_ids = context.bot_data.get("admin_ids", [])
+    admin_ids = context.state.admin_ids
 
+    chat = effective_chat(update)
     if admin_user_id not in admin_ids:
         logger.warning(
             f"Non-admin user {admin_user_id} ({update.message.from_user.full_name}) "
             f"attempted to use {command_label}"
         )
-        if update.effective_chat and update.effective_chat.type != "private":
+        if chat and chat.type != "private":
             return None
-        await update.message.reply_text("❌ Kamu tidak memiliki izin untuk menggunakan perintah ini.")
+        await update.message.reply("❌ Kamu tidak memiliki izin untuk menggunakan perintah ini.")
         return None
 
-    if update.effective_chat and update.effective_chat.type != "private":
-        await update.message.reply_text(
+    if chat and chat.type != "private":
+        await update.message.reply(
             "❌ Perintah ini hanya bisa digunakan di chat pribadi dengan bot."
         )
         return None
 
     if not context.args or len(context.args) == 0:
-        await update.message.reply_text(usage_message)
+        await update.message.reply(usage_message)
         return None
 
     try:
         target_user_id = int(context.args[0])
         return target_user_id
     except ValueError:
-        await update.message.reply_text("❌ User ID harus berupa angka.")
+        await update.message.reply("❌ User ID harus berupa angka.")
         return None

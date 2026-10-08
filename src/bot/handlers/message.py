@@ -9,8 +9,9 @@ have complete profiles (photo + username). It implements two modes:
 
 import logging
 
-from telegram import Update
-from telegram.ext import ContextTypes
+from aiogram.types import Update
+
+from bot.dispatch import HandlerContext, effective_chat
 
 from bot.constants import (
     MISSING_ITEMS_SEPARATOR,
@@ -33,7 +34,7 @@ from bot.services.user_checker import check_user_profile
 logger = logging.getLogger(__name__)
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_message(update: Update, context: HandlerContext) -> None:
     """
     Handle incoming group messages and check user profiles.
 
@@ -57,13 +58,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Only process messages from monitored groups
     if group_config is None:
         logger.info(
-            f"Skipping message: chat not monitored (chat_id={update.effective_chat.id if update.effective_chat else None})"
+            f"Skipping message: chat not monitored (chat_id={effective_chat(update).id if effective_chat(update) else None})"
         )
         return
 
     user = update.message.from_user
     logger.info(
-        f"Handler called: user_id={user.id}, user={user.full_name}, chat_id={update.effective_chat.id}"
+        f"Handler called: user_id={user.id}, user={user.full_name}, chat_id={effective_chat(update).id}"
     )
 
     if user.is_bot:

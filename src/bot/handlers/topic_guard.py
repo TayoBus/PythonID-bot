@@ -8,15 +8,15 @@ post in the warning topic.
 
 import logging
 
-from telegram import Update
-from telegram.ext import ApplicationHandlerStop, ContextTypes
+from aiogram.types import Update
 
+from bot.dispatch import HandlerContext, StopPropagation, effective_chat
 from bot.group_config import get_group_config_for_update
 
 logger = logging.getLogger(__name__)
 
 
-async def guard_warning_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def guard_warning_topic(update: Update, context: HandlerContext) -> None:
     """
     Delete messages from non-admins in the warning topic.
 
@@ -40,7 +40,8 @@ async def guard_warning_topic(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     group_config = get_group_config_for_update(update)
     user = message.from_user
-    chat_id = update.effective_chat.id if update.effective_chat else None
+    chat = effective_chat(update)
+    chat_id = chat.id if chat else None
     thread_id = message.message_thread_id
 
     logger.info(
@@ -68,7 +69,7 @@ async def guard_warning_topic(update: Update, context: ContextTypes.DEFAULT_TYPE
         # Allow bot's own messages
         if user.id == bot_id:
             logger.info(f"Allowing bot's own message (bot_id={bot_id})")
-            raise ApplicationHandlerStop
+            raise StopPropagation
 
         # Check if user is an admin or creator
         logger.info(f"Checking admin status for user {user.id} ({user.full_name})")
@@ -82,7 +83,7 @@ async def guard_warning_topic(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.info(
                 f"Allowing message from {chat_member.status} {user.id} ({user.full_name})"
             )
-            raise ApplicationHandlerStop
+            raise StopPropagation
 
         # Delete message from non-admin user
         logger.info(
@@ -90,9 +91,9 @@ async def guard_warning_topic(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"in warning topic (group_id={group_config.group_id}, thread_id={thread_id})"
         )
         await message.delete()
-        raise ApplicationHandlerStop
+        raise StopPropagation
 
-    except ApplicationHandlerStop:
+    except StopPropagation:
         raise
     except Exception as e:
         logger.error(
@@ -107,4 +108,4 @@ async def guard_warning_topic(update: Update, context: ContextTypes.DEFAULT_TYPE
                 f"Failed to delete message during error recovery: {delete_error}",
                 exc_info=True,
             )
-        raise ApplicationHandlerStop
+        raise StopPropagation

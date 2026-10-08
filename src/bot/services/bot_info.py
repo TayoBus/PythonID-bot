@@ -6,7 +6,7 @@ to avoid repeated API calls. The bot's username rarely changes, so
 caching it after the first fetch is efficient.
 """
 
-from telegram import Bot
+from aiogram import Bot
 
 
 class BotInfoCache:

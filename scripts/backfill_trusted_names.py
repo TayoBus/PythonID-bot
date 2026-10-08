@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 
-from telegram import Bot
+from aiogram import Bot
 
 from bot.config import get_settings
 from bot.database.service import get_database, init_database

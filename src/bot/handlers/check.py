@@ -13,9 +13,11 @@ so that admin authorization can be checked per-group.
 
 import logging
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.error import TimedOut
-from telegram.ext import ContextTypes
+from aiogram import Bot
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Update
+
+from bot.dispatch import HandlerContext
 
 from bot.constants import (
     ADMIN_CHECK_ACTION_COMPLETE,
@@ -36,6 +38,7 @@ from bot.constants import (
 from bot.database.service import get_database
 from bot.group_config import get_group_registry
 from bot.services.telegram_utils import (
+    edit_callback_message,
     extract_forwarded_user,
     get_admin_groups,
     get_user_mention,
@@ -86,7 +89,7 @@ def _build_group_selector_keyboard(
                 callback_data=f"checkgrp:{gid}:{user_id}",
             )
         )
-    return InlineKeyboardMarkup([[b] for b in buttons])
+    return InlineKeyboardMarkup(inline_keyboard=[[b] for b in buttons])
 
 
 def _build_action_keyboard(
@@ -107,7 +110,7 @@ def _build_action_keyboard(
     if not is_complete:
         buttons.append(
             InlineKeyboardButton(
-                CHECK_WARN_BUTTON_LABEL,
+                text=CHECK_WARN_BUTTON_LABEL,
                 callback_data=f"warn:{group_id}:{user_id}:{missing_code}",
             )
         )
@@ -116,14 +119,14 @@ def _build_action_keyboard(
         if is_whitelisted:
             buttons.append(
                 InlineKeyboardButton(
-                    CHECK_UNVERIFY_BUTTON_LABEL,
+                    text=CHECK_UNVERIFY_BUTTON_LABEL,
                     callback_data=f"unverify:{group_id}:{user_id}",
                 )
             )
         else:
             buttons.append(
                 InlineKeyboardButton(
-                    CHECK_VERIFY_BUTTON_LABEL,
+                    text=CHECK_VERIFY_BUTTON_LABEL,
                     callback_data=f"verify:{group_id}:{user_id}",
                 )
             )
@@ -131,33 +134,33 @@ def _build_action_keyboard(
     if is_trusted:
         buttons.append(
             InlineKeyboardButton(
-                CHECK_UNTRUST_BUTTON_LABEL,
+                text=CHECK_UNTRUST_BUTTON_LABEL,
                 callback_data=f"untrust:{group_id}:{user_id}",
             )
         )
     else:
         buttons.append(
             InlineKeyboardButton(
-                CHECK_TRUST_BUTTON_LABEL,
+                text=CHECK_TRUST_BUTTON_LABEL,
                 callback_data=f"trust:{group_id}:{user_id}",
             )
         )
 
     buttons.append(
         InlineKeyboardButton(
-            CHECK_UNRESTRICT_BUTTON_LABEL,
+            text=CHECK_UNRESTRICT_BUTTON_LABEL,
             callback_data=f"unrestrict:{group_id}:{user_id}",
         )
     )
 
     # Split into rows of max 2 buttons for mobile readability
     rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _show_check_result(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    context: HandlerContext,
     target_user_id: int,
     user_name: str,
 ) -> None:
@@ -167,8 +170,15 @@ async def _show_check_result(
     If the admin is admin in only one group, shows actions directly.
     If admin in multiple groups, shows a group selector first.
     """
-    admin_user_id = update.message.from_user.id if update.message else update.callback_query.from_user.id  # type: ignore[union-attr]
-    reply_func = update.message.reply_text if update.message else update.callback_query.edit_message_text  # type: ignore[union-attr]
+    message = update.message
+    query = update.callback_query
+    admin_user_id = message.from_user.id if message else query.from_user.id  # type: ignore[union-attr]
+
+    async def reply_func(text: str, **kwargs: object) -> None:
+        if message is not None:
+            await message.reply(text, **kwargs)
+        else:
+            await edit_callback_message(query, text, **kwargs)  # type: ignore[arg-type]
 
     user_mention, photo_status, has_photo, has_username, is_whitelisted, is_trusted = (
         await _build_profile_status(context.bot, target_user_id, user_name)
@@ -214,7 +224,7 @@ async def _show_check_result(
 
 
 async def handle_check_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle /check command to manually check a user's profile.
@@ -244,16 +254,16 @@ async def handle_check_command(
             f"Admin {admin_user_id} ({update.message.from_user.full_name}) "
             f"checked profile for user {target_user_id}"
         )
-    except TimedOut:
-        await update.message.reply_text("⏳ Request timeout. Silakan coba lagi.")
+    except TelegramNetworkError:
+        await update.message.reply("⏳ Request timeout. Silakan coba lagi.")
         logger.warning(f"Timeout checking user {target_user_id}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Gagal memeriksa user: {e}")
+        await update.message.reply(f"❌ Gagal memeriksa user: {e}")
         logger.error(f"Error checking user {target_user_id}: {e}", exc_info=True)
 
 
 async def handle_check_forwarded_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle forwarded messages from admins to check user profile.
@@ -268,7 +278,7 @@ async def handle_check_forwarded_message(
 
     forwarded_info = extract_forwarded_user(update.message)
     if not forwarded_info:
-        await update.message.reply_text(
+        await update.message.reply(
             "❌ Tidak dapat mengekstrak informasi user dari pesan yang diteruskan.\n"
             "Pastikan user tidak menyembunyikan status forward di pengaturan privasi."
         )
@@ -283,16 +293,16 @@ async def handle_check_forwarded_message(
             f"Admin {admin_user_id} ({update.message.from_user.full_name}) "
             f"forwarded message from user {user_id} for profile check"
         )
-    except TimedOut:
-        await update.message.reply_text("⏳ Request timeout. Silakan coba lagi.")
+    except TelegramNetworkError:
+        await update.message.reply("⏳ Request timeout. Silakan coba lagi.")
         logger.warning(f"Timeout checking forwarded user {user_id}")
     except Exception as e:
-        await update.message.reply_text(f"❌ Gagal memeriksa user: {e}")
+        await update.message.reply(f"❌ Gagal memeriksa user: {e}")
         logger.error(f"Error checking forwarded user {user_id}: {e}", exc_info=True)
 
 
 async def handle_check_group_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle callback query for group selection in /check.
@@ -310,12 +320,12 @@ async def handle_check_group_callback(
         group_id = int(parts[1])
         target_user_id = int(parts[2])
     except (IndexError, ValueError):
-        await query.edit_message_text("❌ Data callback tidak valid.")
+        await edit_callback_message(query, "❌ Data callback tidak valid.")
         return
 
     admin_user_id = query.from_user.id
     if not is_user_admin_in_group(context, group_id, admin_user_id):
-        await query.edit_message_text("❌ Kamu bukan admin di grup ini.")
+        await edit_callback_message(query, "❌ Kamu bukan admin di grup ini.")
         return
 
     try:
@@ -345,9 +355,9 @@ async def handle_check_group_callback(
         keyboard = _build_action_keyboard(
             group_id, target_user_id, is_complete, is_whitelisted, is_trusted, missing_code
         )
-        await query.edit_message_text(message, reply_markup=keyboard, parse_mode="Markdown")
+        await edit_callback_message(query, message, reply_markup=keyboard, parse_mode="Markdown")
     except Exception as e:
-        await query.edit_message_text(f"❌ Gagal memeriksa user: {e}")
+        await edit_callback_message(query, f"❌ Gagal memeriksa user: {e}")
         logger.error(f"Error in check group callback: {e}", exc_info=True)
 
 
@@ -364,7 +374,7 @@ def _parse_warn_callback_data(data: str) -> tuple[int, int, str] | None:
 
 
 async def handle_warn_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """
     Handle callback query for warn button.
@@ -379,14 +389,14 @@ async def handle_warn_callback(
 
     parsed = _parse_warn_callback_data(query.data)
     if parsed is None:
-        await query.edit_message_text("❌ Data callback tidak valid.")
+        await edit_callback_message(query, "❌ Data callback tidak valid.")
         logger.error(f"Invalid callback_data format: {query.data}")
         return
     group_id, target_user_id, missing_code = parsed
 
     admin_user_id = query.from_user.id
     if not is_user_admin_in_group(context, group_id, admin_user_id):
-        await query.edit_message_text("❌ Kamu bukan admin di grup ini.")
+        await edit_callback_message(query, "❌ Kamu bukan admin di grup ini.")
         return
 
     missing_items = []
@@ -400,7 +410,7 @@ async def handle_warn_callback(
     group_config = registry.get(group_id)
 
     if group_config is None:
-        await query.edit_message_text("❌ Grup tidak ditemukan di registry.")
+        await edit_callback_message(query, "❌ Grup tidak ditemukan di registry.")
         return
 
     try:
@@ -422,16 +432,16 @@ async def handle_warn_callback(
 
         if ok:
             success_message = ADMIN_WARN_SENT_MESSAGE.format(user_mention=user_mention)
-            await query.edit_message_text(success_message, parse_mode="Markdown")
+            await edit_callback_message(query, success_message, parse_mode="Markdown")
             logger.info(
                 f"Admin {admin_user_id} sent warning to user {target_user_id} in group {group_id}"
             )
         else:
-            await query.edit_message_text("❌ Gagal mengirim peringatan ke grup.")
+            await edit_callback_message(query, "❌ Gagal mengirim peringatan ke grup.")
 
-    except TimedOut:
-        await query.edit_message_text("⏳ Request timeout. Silakan coba lagi.")
+    except TelegramNetworkError:
+        await edit_callback_message(query, "⏳ Request timeout. Silakan coba lagi.")
         logger.warning(f"Timeout sending warning to user {target_user_id}")
     except Exception as e:
-        await query.edit_message_text(f"❌ Gagal mengirim peringatan: {e}")
+        await edit_callback_message(query, f"❌ Gagal mengirim peringatan: {e}")
         logger.error(f"Error sending warning to user {target_user_id}: {e}", exc_info=True)

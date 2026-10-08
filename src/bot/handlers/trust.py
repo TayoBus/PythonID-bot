@@ -13,9 +13,10 @@ and verify the caller is an admin of that specific group.
 import logging
 from datetime import UTC
 
-from telegram import Update
-from telegram.ext import ContextTypes
-from telegram.helpers import escape_markdown
+from aiogram.types import Update
+
+from bot.dispatch import HandlerContext, effective_chat
+from bot.services.markdown import escape_markdown
 
 from bot.constants import (
     TRUST_ADDED_MESSAGE,
@@ -35,6 +36,7 @@ from bot.database.models import TrustedUserData
 from bot.database.service import DatabaseService, get_database
 from bot.group_config import GroupRegistry, get_group_registry
 from bot.services.telegram_utils import (
+    edit_callback_message,
     extract_forwarded_user,
     is_user_admin_in_group,
 )
@@ -42,12 +44,20 @@ from bot.services.telegram_utils import (
 logger = logging.getLogger(__name__)
 
 
-def _add_trusted_cache(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
-    context.bot_data.setdefault("trusted_user_ids", set()).add(user_id)
+def _add_trusted_cache(context: HandlerContext, user_id: int) -> None:
+    trusted = context.state.trusted_user_ids
+    if trusted is None:
+        trusted = set()
+        context.state.trusted_user_ids = trusted
+    trusted.add(user_id)
 
 
-def _remove_trusted_cache(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
-    context.bot_data.setdefault("trusted_user_ids", set()).discard(user_id)
+def _remove_trusted_cache(context: HandlerContext, user_id: int) -> None:
+    trusted = context.state.trusted_user_ids
+    if trusted is None:
+        trusted = set()
+        context.state.trusted_user_ids = trusted
+    trusted.discard(user_id)
 
 
 def _format_person(full_name: str, user_id: int) -> str:
@@ -139,25 +149,26 @@ async def trust_user(
 
 
 async def handle_trust_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """Handle /trust command in bot DM."""
     if not update.message or not update.message.from_user:
         return
 
-    if update.effective_chat and update.effective_chat.type != "private":
-        await update.message.reply_text(TRUST_DM_ONLY_MESSAGE)
+    chat = effective_chat(update)
+    if chat and chat.type != "private":
+        await update.message.reply(TRUST_DM_ONLY_MESSAGE)
         return
 
     admin_user_id = update.message.from_user.id
-    admin_ids = context.bot_data.get("admin_ids", [])
+    admin_ids = context.state.admin_ids
     if admin_user_id not in admin_ids:
-        await update.message.reply_text(TRUST_NO_PERMISSION_MESSAGE)
+        await update.message.reply(TRUST_NO_PERMISSION_MESSAGE)
         return
 
     target_user_id, error_message = _resolve_target_user_id(update, context.args)
     if error_message is not None:
-        await update.message.reply_text(error_message)
+        await update.message.reply(error_message)
         return
 
     target_full_name = ""
@@ -178,7 +189,7 @@ async def handle_trust_command(
             admin_username=update.message.from_user.username,
         )
         _add_trusted_cache(context, target_user_id)
-        await update.message.reply_text(
+        await update.message.reply(
             TRUST_ADDED_MESSAGE.format(
                 user_id=target_user_id,
                 probation_clear_count=cleared_count,
@@ -186,32 +197,33 @@ async def handle_trust_command(
             parse_mode="Markdown",
         )
     except ValueError:
-        await update.message.reply_text(
+        await update.message.reply(
             TRUST_ALREADY_EXISTS_MESSAGE.format(user_id=target_user_id),
             parse_mode="Markdown",
         )
 
 
 async def handle_untrust_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """Handle /untrust command in bot DM."""
     if not update.message or not update.message.from_user:
         return
 
-    if update.effective_chat and update.effective_chat.type != "private":
-        await update.message.reply_text(TRUST_DM_ONLY_MESSAGE)
+    chat = effective_chat(update)
+    if chat and chat.type != "private":
+        await update.message.reply(TRUST_DM_ONLY_MESSAGE)
         return
 
     admin_user_id = update.message.from_user.id
-    admin_ids = context.bot_data.get("admin_ids", [])
+    admin_ids = context.state.admin_ids
     if admin_user_id not in admin_ids:
-        await update.message.reply_text(TRUST_NO_PERMISSION_MESSAGE)
+        await update.message.reply(TRUST_NO_PERMISSION_MESSAGE)
         return
 
     target_user_id, error_message = _resolve_target_user_id(update, context.args)
     if error_message is not None:
-        await update.message.reply_text(error_message)
+        await update.message.reply(error_message)
         return
 
     db = get_database()
@@ -219,39 +231,40 @@ async def handle_untrust_command(
     try:
         db.remove_trusted_user(user_id=target_user_id)
         _remove_trusted_cache(context, target_user_id)
-        await update.message.reply_text(
+        await update.message.reply(
             TRUST_REMOVED_MESSAGE.format(user_id=target_user_id),
             parse_mode="Markdown",
         )
     except ValueError:
-        await update.message.reply_text(
+        await update.message.reply(
             TRUST_USER_NOT_FOUND_MESSAGE.format(user_id=target_user_id),
             parse_mode="Markdown",
         )
 
 
 async def handle_trusted_list_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """Handle /trusted command in bot DM."""
     if not update.message or not update.message.from_user:
         return
 
-    if update.effective_chat and update.effective_chat.type != "private":
-        await update.message.reply_text(TRUST_DM_ONLY_MESSAGE)
+    chat = effective_chat(update)
+    if chat and chat.type != "private":
+        await update.message.reply(TRUST_DM_ONLY_MESSAGE)
         return
 
     admin_user_id = update.message.from_user.id
-    admin_ids = context.bot_data.get("admin_ids", [])
+    admin_ids = context.state.admin_ids
     if admin_user_id not in admin_ids:
-        await update.message.reply_text(TRUST_NO_PERMISSION_MESSAGE)
+        await update.message.reply(TRUST_NO_PERMISSION_MESSAGE)
         return
 
     db = get_database()
     trusted_users = db.get_trusted_users()
 
     if not trusted_users:
-        await update.message.reply_text(TRUST_LIST_EMPTY_MESSAGE)
+        await update.message.reply(TRUST_LIST_EMPTY_MESSAGE)
         return
 
     trusted_lines = []
@@ -273,14 +286,14 @@ async def handle_trusted_list_command(
             f"(`{record.trusted_by_admin_id}`) pada `{trusted_at_display}`"
         )
 
-    await update.message.reply_text(
+    await update.message.reply(
         TRUST_LIST_HEADER.format(trusted_lines="\n".join(trusted_lines)),
         parse_mode="Markdown",
     )
 
 
 async def handle_trust_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """Handle trust callback button (group-scoped).
 
@@ -297,12 +310,12 @@ async def handle_trust_callback(
         group_id = int(parts[1])
         target_user_id = int(parts[2])
     except (IndexError, ValueError):
-        await query.edit_message_text(TRUST_CALLBACK_INVALID_MESSAGE)
+        await edit_callback_message(query, TRUST_CALLBACK_INVALID_MESSAGE)
         return
 
     admin_user_id = query.from_user.id
     if not is_user_admin_in_group(context, group_id, admin_user_id):
-        await query.edit_message_text(TRUST_NO_GROUP_PERMISSION_MESSAGE)
+        await edit_callback_message(query, TRUST_NO_GROUP_PERMISSION_MESSAGE)
         return
 
     db = get_database()
@@ -316,7 +329,7 @@ async def handle_trust_callback(
             group_id=group_id,
         )
         _add_trusted_cache(context, target_user_id)
-        await query.edit_message_text(
+        await edit_callback_message(query, 
             TRUST_ADDED_MESSAGE.format(
                 user_id=target_user_id,
                 probation_clear_count=cleared_count,
@@ -324,14 +337,14 @@ async def handle_trust_callback(
             parse_mode="Markdown",
         )
     except ValueError:
-        await query.edit_message_text(
+        await edit_callback_message(query, 
             TRUST_ALREADY_EXISTS_MESSAGE.format(user_id=target_user_id),
             parse_mode="Markdown",
         )
 
 
 async def handle_untrust_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
+    update: Update, context: HandlerContext
 ) -> None:
     """Handle untrust callback button (group-scoped).
 
@@ -348,12 +361,12 @@ async def handle_untrust_callback(
         group_id = int(parts[1])
         target_user_id = int(parts[2])
     except (IndexError, ValueError):
-        await query.edit_message_text(TRUST_CALLBACK_INVALID_MESSAGE)
+        await edit_callback_message(query, TRUST_CALLBACK_INVALID_MESSAGE)
         return
 
     admin_user_id = query.from_user.id
     if not is_user_admin_in_group(context, group_id, admin_user_id):
-        await query.edit_message_text(TRUST_NO_GROUP_PERMISSION_MESSAGE)
+        await edit_callback_message(query, TRUST_NO_GROUP_PERMISSION_MESSAGE)
         return
 
     db = get_database()
@@ -361,12 +374,12 @@ async def handle_untrust_callback(
     try:
         db.remove_trusted_user(user_id=target_user_id)
         _remove_trusted_cache(context, target_user_id)
-        await query.edit_message_text(
+        await edit_callback_message(query, 
             TRUST_REMOVED_MESSAGE.format(user_id=target_user_id),
             parse_mode="Markdown",
         )
     except ValueError:
-        await query.edit_message_text(
+        await edit_callback_message(query, 
             TRUST_USER_NOT_FOUND_MESSAGE.format(user_id=target_user_id),
             parse_mode="Markdown",
         )

@@ -2,9 +2,10 @@
 
 import logging
 
-from telegram import Message, Update, User
-from telegram.error import TelegramError
-from telegram.ext import ApplicationHandlerStop, ContextTypes, filters
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import Message, Update, User
+
+from bot.dispatch import HandlerContext, StopPropagation
 
 from bot.constants import (
     GUEST_BOT_RESTRICTION,
@@ -23,14 +24,18 @@ from bot.services.telegram_utils import (
 logger = logging.getLogger(__name__)
 
 
-class GuestBotFilter(filters.MessageFilter):
-    """Message filter matching only Telegram Guest Mode messages."""
+def guest_bot_filter(update: Update) -> bool:
+    """Filter predicate matching only Telegram Guest Mode messages.
 
-    def filter(self, message: Message) -> bool:
-        return (
-            message.guest_bot_caller_user is not None
-            or message.guest_bot_caller_chat is not None
-        )
+    aiogram's ``Message`` model natively exposes the Bot API 10.1
+    ``guest_bot_caller_user`` / ``guest_bot_caller_chat`` fields.
+    """
+    message = update.message or update.edited_message
+    return message is not None and is_guest_bot_message(message)
+
+
+# Backwards-compatible alias (the PTB ``MessageFilter`` subclass is gone).
+GuestBotFilter = guest_bot_filter
 
 
 def is_guest_bot_message(message: Message) -> bool:
@@ -46,7 +51,7 @@ def is_guest_bot_whitelisted(message: Message, whitelist: list[str]) -> bool:
     return username.lower() in whitelist
 
 
-async def handle_guest_bot_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def handle_guest_bot_message(update: Update, context: HandlerContext) -> None:
     """Delete unapproved guest bot messages and progressively restrict their caller."""
     message = update.message or update.edited_message
     if message is None:
@@ -65,17 +70,17 @@ async def handle_guest_bot_message(update: Update, context: ContextTypes.DEFAULT
     caller = message.guest_bot_caller_user or message.guest_bot_caller_chat
     try:
         await message.delete()
-    except TelegramError:
+    except TelegramAPIError:
         logger.error("Failed to delete guest bot message", exc_info=True)
 
     if not isinstance(caller, User):
-        raise ApplicationHandlerStop
+        raise StopPropagation
     if is_user_admin_or_trusted(context, group_config.group_id, caller.id):
-        raise ApplicationHandlerStop
+        raise StopPropagation
 
     db = get_database()
     if db.is_user_restricted_by_bot(caller.id, group_config.group_id, warning_kind="guest_bot"):
-        raise ApplicationHandlerStop
+        raise StopPropagation
 
     record = db.get_or_create_user_warning(caller.id, group_config.group_id, warning_kind="guest_bot")
     user_mention = get_user_mention(caller)
@@ -99,7 +104,7 @@ async def handle_guest_bot_message(update: Update, context: ContextTypes.DEFAULT
                             user_id=caller.id,
                             permissions=RESTRICTED_PERMISSIONS,
                         )
-                    except TelegramError as e:
+                    except TelegramAPIError as e:
                         logger.error("Failed to restrict guest bot caller %s: %s", caller.id, e, exc_info=True)
                     if ok:
                         db.mark_user_restricted(caller.id, group_config.group_id, warning_kind="guest_bot")
@@ -110,7 +115,7 @@ async def handle_guest_bot_message(update: Update, context: ContextTypes.DEFAULT
                         # restriction instead of drifting past it forever.
                         should_stop = True
         if should_stop:
-            raise ApplicationHandlerStop
+            raise StopPropagation
         try:
             await context.bot.send_message(
                 chat_id=group_config.group_id,
@@ -122,7 +127,7 @@ async def handle_guest_bot_message(update: Update, context: ContextTypes.DEFAULT
                 ),
                 parse_mode="Markdown",
             )
-        except TelegramError:
+        except TelegramAPIError:
             logger.error("Failed to send guest bot restriction notice for user %s", caller.id, exc_info=True)
     elif record.message_count == 1:
         try:
@@ -136,10 +141,10 @@ async def handle_guest_bot_message(update: Update, context: ContextTypes.DEFAULT
                 ),
                 parse_mode="Markdown",
             )
-        except TelegramError:
+        except TelegramAPIError:
             logger.error("Failed to send guest bot warning for user %s", caller.id, exc_info=True)
         db.increment_message_count(caller.id, group_config.group_id, warning_kind="guest_bot")
     else:
         db.increment_message_count(caller.id, group_config.group_id, warning_kind="guest_bot")
 
-    raise ApplicationHandlerStop
+    raise StopPropagation
