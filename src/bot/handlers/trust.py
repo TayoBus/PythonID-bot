@@ -10,10 +10,11 @@ Callback buttons (trust/untrust) are group-scoped: they encode group_id
 and verify the caller is an admin of that specific group.
 """
 
+import html
 import logging
 from datetime import UTC
 
-from aiogram.types import Update
+from aiogram.types import InputRichMessage, Update
 
 from bot.dispatch import HandlerContext, effective_chat
 from bot.services.markdown import escape_markdown
@@ -25,6 +26,8 @@ from bot.constants import (
     TRUST_DM_ONLY_MESSAGE,
     TRUST_LIST_EMPTY_MESSAGE,
     TRUST_LIST_HEADER,
+    TRUST_LIST_RICH_COLUMNS,
+    TRUST_LIST_RICH_HEADING,
     TRUST_NO_GROUP_PERMISSION_MESSAGE,
     TRUST_NO_PERMISSION_MESSAGE,
     TRUST_REMOVED_MESSAGE,
@@ -73,6 +76,35 @@ def _format_person_with_username(full_name: str, username: str | None, user_id: 
     if username:
         display += f" (@{escape_markdown(username, version=1)})"
     return display
+
+
+def _plain_person(full_name: str, username: str | None, user_id: int) -> str:
+    """Return a plain-text display for a stored person (rich HTML path).
+
+    Unlike _format_person_with_username this applies no Markdown escaping;
+    the rich renderer applies html.escape() instead.
+    """
+    display = full_name or f"User {user_id}"
+    if username:
+        display += f" (@{username})"
+    return display
+
+
+def _trusted_list_rich_html(rows: list[tuple[str, str, str, str]]) -> str:
+    """Render trusted-user rows as a native rich table (Bot API 10.1+).
+
+    Follows the proven <table bordered striped> pattern: header row plus
+    one row per trusted user. All cell content is html-escaped.
+    """
+    header = "".join(f"<th>{html.escape(col)}</th>" for col in TRUST_LIST_RICH_COLUMNS)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>"
+        for row in rows
+    )
+    return (
+        f"<b>{html.escape(TRUST_LIST_RICH_HEADING)}</b>"
+        f"<table bordered striped><tr>{header}</tr>{body}</table>"
+    )
 
 
 def _resolve_target_user_id(
@@ -268,6 +300,7 @@ async def handle_trusted_list_command(
         return
 
     trusted_lines = []
+    rich_rows = []
     for record in trusted_users:
         trusted_at = record.trusted_at
         if trusted_at.tzinfo is None:
@@ -285,11 +318,39 @@ async def handle_trusted_list_command(
             f"• {user_display} (`{record.user_id}`) — oleh {admin_display} "
             f"(`{record.trusted_by_admin_id}`) pada `{trusted_at_display}`"
         )
+        rich_rows.append(
+            (
+                _plain_person(record.user_full_name, record.username, record.user_id),
+                str(record.user_id),
+                _plain_person(
+                    record.admin_full_name,
+                    record.admin_username,
+                    record.trusted_by_admin_id,
+                ),
+                trusted_at_display,
+            )
+        )
 
-    await update.message.reply(
-        TRUST_LIST_HEADER.format(trusted_lines="\n".join(trusted_lines)),
-        parse_mode="Markdown",
-    )
+    # Rich table is the default; any failure degrades to the Markdown list.
+    # Broad except is deliberate: the Markdown path must survive whatever
+    # broke the rich send (API errors, serialization, client issues).
+    try:
+        await context.bot.send_rich_message(
+            chat_id=update.message.chat.id,
+            rich_message=InputRichMessage(
+                html=_trusted_list_rich_html(rich_rows)
+            ),
+            reply_parameters=update.message.as_reply_parameters(),
+        )
+    except Exception:
+        logger.warning(
+            "Rich trusted-list send failed, falling back to Markdown",
+            exc_info=True,
+        )
+        await update.message.reply(
+            TRUST_LIST_HEADER.format(trusted_lines="\n".join(trusted_lines)),
+            parse_mode="Markdown",
+        )
 
 
 async def handle_trust_callback(

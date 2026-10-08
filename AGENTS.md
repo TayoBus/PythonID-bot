@@ -214,6 +214,12 @@ group=7   # ai_spam_monitor: Runs LAST, classifier.dev AI spam monitoring (last 
 - No `UserWarning` DB record is created — admin-confirmed restrictions are not DM-self-service-reversible (same as duplicate_spam); no `StopPropagation` is raised
 - Per-group kill switch: `"plugins": {"ai_spam_monitor": false}` / `"plugins": {"ai_spam_callback": false}` in groups.json; no alert chat configured → logfire-only monitoring
 
+### Rich Text (DM Admin Commands)
+- Data-dense DM admin outputs use Bot API 10.1+ native rich messages (`context.bot.send_rich_message` with `aiogram.types.InputRichMessage(html=...)`); currently only `/trusted` (native `<table bordered striped>` with columns User | User ID | Added by | Date). Same pattern as the mediadownloadbot metadata table
+- Rich is the default with a **Markdown fallback**: any `send_rich_message` failure is caught (broad except, logged with `exc_info=True`) and the handler sends the pre-existing Markdown message instead — the Markdown path is never deleted, only demoted to fallback
+- Scope is DM-only admin surface: group-facing messages stay on Markdown v1, so member-visible output never changes and old clients are unaffected where it matters
+- Rich HTML content is `html.escape()`d (not the Markdown escaper); headings/column labels live in `constants.py` (`TRUST_LIST_RICH_HEADING`, `TRUST_LIST_RICH_COLUMNS`)
+
 ### Topic Guard Design
 - Handles both `message` and `edited_message` updates (combined filter)
 - Raises `StopPropagation` after handling ANY warning-topic message (allows or deletes)
