@@ -674,3 +674,66 @@ class TestDispatchLogging:
         with caplog.at_level(logging.INFO, logger="bot.dispatch"):
             await dispatch_update(_make_update(), bot, state)
         assert "dispatch: update_id=1 no handlers registered" in caplog.text
+
+
+class TestDmCommandCarveOut:
+    """The DM unrestriction flow must not swallow admin commands.
+
+    Regression: ``dm`` registers before ``status`` in group 0, and its old
+    check (private + text) matched ``/status`` DMs first, so ``handle_dm``
+    answered with the unrestriction message and ``handle_status`` never ran.
+    The DM flow owns free text and /start deep links only.
+    """
+
+    def _dm_update(self, text, entities=None):
+        return Update(
+            update_id=1,
+            message=Message(
+                message_id=1,
+                date=datetime.now(),
+                chat=Chat(id=123, type="private"),
+                from_user=User(id=1, is_bot=False, first_name="T"),
+                text=text,
+                entities=entities or [],
+            ),
+        )
+
+    def _command_update(self, text):
+        first = text.split()[0]
+        return self._dm_update(
+            text,
+            entities=[MessageEntity(type="bot_command", offset=0, length=len(first))],
+        )
+
+    def _specs(self):
+        from bot.plugins.builtin.dm import register_dm
+        from bot.plugins.builtin.status import register_status
+        state = AppState()
+        state.bot_username = "TestBot"
+        return register_dm(state)[0], register_status(state)[0]
+
+    def test_status_command_reaches_status_not_dm(self):
+        dm_spec, status_spec = self._specs()
+        update = self._command_update("/status")
+        assert dm_spec.check(update) is False
+        assert status_spec.check(update) is True
+
+    def test_other_commands_not_swallowed_by_dm(self):
+        dm_spec, _ = self._specs()
+        update = self._command_update("/trusted")
+        assert dm_spec.check(update) is False
+
+    def test_start_deep_link_still_goes_to_dm(self):
+        dm_spec, _ = self._specs()
+        update = self._command_update("/start verify_-100123")
+        assert dm_spec.check(update) is True
+
+    def test_plain_start_still_goes_to_dm(self):
+        dm_spec, _ = self._specs()
+        update = self._command_update("/start")
+        assert dm_spec.check(update) is True
+
+    def test_free_text_still_goes_to_dm(self):
+        dm_spec, _ = self._specs()
+        update = self._dm_update("halo bot")
+        assert dm_spec.check(update) is True
