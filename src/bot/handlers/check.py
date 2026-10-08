@@ -170,13 +170,13 @@ async def _show_check_result(
     If the admin is admin in only one group, shows actions directly.
     If admin in multiple groups, shows a group selector first.
     """
-    message = update.message
+    tg_message = update.message
     query = update.callback_query
-    admin_user_id = message.from_user.id if message else query.from_user.id  # type: ignore[union-attr]
+    admin_user_id = tg_message.from_user.id if tg_message else query.from_user.id  # type: ignore[union-attr]
 
     async def reply_func(text: str, **kwargs: object) -> None:
-        if message is not None:
-            await message.reply(text, **kwargs)
+        if tg_message is not None:
+            await tg_message.reply(text, **kwargs)
         else:
             await edit_callback_message(query, text, **kwargs)  # type: ignore[arg-type]
 

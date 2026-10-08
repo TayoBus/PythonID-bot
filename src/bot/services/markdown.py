@@ -20,7 +20,7 @@ def escape_markdown(text: str, version: int = 1) -> str:
         Text with markdown control characters backslash-escaped.
     """
     if version == 1:
-        escape_chars = r"\*_`\["
+        escape_chars = r"_*`["
     elif version == 2:
         escape_chars = r"\_*[]()~`>#+-=|{}.!"
     else:
