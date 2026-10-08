@@ -14,7 +14,8 @@ PluginManifest = list[dict[str, str | int]]
 
 # Human-readable metadata for each known built-in plugin.
 # Order matches main.py registration order (topic_guard first).
-# handler_group values match the PTB group argument used in main.py.
+# handler_group values match the dispatch group used by the group-ordered
+# dispatcher in bot/dispatch.py.
 _PLUGIN_DEFINITIONS: PluginManifest = [
     {"name": "topic_guard", "handler_group": -1, "description": "Intercept warning-topic messages before other handlers"},
     {"name": "verify", "handler_group": 0, "description": "Admin /verify command"},

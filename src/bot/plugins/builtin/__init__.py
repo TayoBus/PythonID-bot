@@ -1,8 +1,7 @@
 """Built-in plugin wrappers for the PythonID bot.
 
-Each submodule exports a single ``plugin`` object satisfying
-``PluginProtocol`` that knows how to register its handlers onto
-a PTB ``Application`` instance.
+Each submodule exports registrar functions that register their handlers
+against the shared ``AppState``, returning lists of ``HandlerSpec``.
 """
 
 from bot.plugins.builtin import (
