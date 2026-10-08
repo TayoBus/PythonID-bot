@@ -263,7 +263,8 @@ Time threshold → Auto-restrict via scheduler (parallel path)
 - **Python 3.11+** with type hints
 - **Imports**: stdlib → third-party → local
 - **Async/await**: All handlers are async
-- **aiogram 3.x**: Handlers are `async (update: Update, context: HandlerContext)`; updates flow through the manual group-ordered dispatch loop in `bot/dispatch.py` (`AppState` carries shared state, injected via `dp.start_polling(..., state=state)`)
+- **aiogram 3.x**: Handlers are `async (update: Update, context: HandlerContext)`; updates flow through the manual group-ordered dispatch loop in `bot/dispatch.py` (`AppState` carries shared state, injected via `dp.start_polling(..., app_state=app_state)`)
+- **Dispatcher wiring gotchas** (learned the hard way, 2026-10-08): (1) never register the update entrypoint on `dp.update()` — `Dispatcher.__init__` registers its internal `_listen_update` there first and the observer stops at the first matching handler, so a user `@dp.update()` handler silently never runs (every update logs "not handled"); register on the concrete sub-observers (`dp.message()`, `dp.edited_message()`, `dp.callback_query()`, `dp.chat_member()`) and recover the full `Update` via the `event_update` kwarg. (2) name the shared-state kwarg `app_state`, never `state` — `FSMContextMiddleware` injects its own `FSMContext` as `state` on update handlers and shadows yours. `build_dispatcher()` in `main.py` centralizes this wiring; `tests/test_main_wiring.py` feeds synthetic updates through a real `Dispatcher` to guard it
 - **Logging**: Use `logfire` via stdlib `logging.getLogger(__name__)`
 - **Error handling**: Catch specific exceptions (`TelegramNetworkError`), log, return gracefully
 - **No inline comments** unless code is complex

@@ -56,7 +56,7 @@ class AppState:
     """Explicit shared runtime state (replaces PTB ``application.bot_data``).
 
     Injected into the aiogram dispatcher via
-    ``dp.start_polling(bot, state=state)`` and handed to every handler
+    ``dp.start_polling(bot, app_state=state)`` and handed to every handler
     inside :class:`HandlerContext`.
     """
 
