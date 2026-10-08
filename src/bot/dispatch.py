@@ -238,6 +238,49 @@ def update_kind(update: Update) -> str | None:
     return None
 
 
+def _update_chat(update: Update):
+    """Return the chat attached to an update, regardless of kind."""
+    if update.message is not None:
+        return update.message.chat
+    if update.edited_message is not None:
+        return update.edited_message.chat
+    if update.callback_query is not None and update.callback_query.message is not None:
+        return update.callback_query.message.chat
+    if update.chat_member is not None:
+        return update.chat_member.chat
+    return None
+
+
+def _chat_label(update: Update) -> str:
+    chat = _update_chat(update)
+    if chat is None:
+        return "?"
+    return f"{chat.type}:{chat.id}"
+
+
+def _update_user_id(update: Update) -> int | str:
+    """Return the acting user id for an update, regardless of kind."""
+    if update.message is not None and update.message.from_user is not None:
+        return update.message.from_user.id
+    if update.edited_message is not None and update.edited_message.from_user is not None:
+        return update.edited_message.from_user.id
+    if update.callback_query is not None and update.callback_query.from_user is not None:
+        return update.callback_query.from_user.id
+    if update.chat_member is not None and update.chat_member.from_user is not None:
+        return update.chat_member.from_user.id
+    return "?"
+
+
+def _command_suffix(update: Update) -> str:
+    """Append the command text (if any) to the dispatch entry log line."""
+    message = _message_or_none(update)
+    if message is not None and message.text:
+        text = message.text.strip().split()[0]
+        if text.startswith("/"):
+            return f" cmd={text[:40]}"
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Filter predicates (replacements for PTB filters)
 # ---------------------------------------------------------------------------
@@ -426,10 +469,14 @@ async def handle_bot_error(update: Update | None, exc: BaseException) -> None:
     aiogram's ``TelegramNetworkError``) are transient and logged at
     warning level; everything else is logged as an error with traceback.
     """
+    update_id = update.update_id if update is not None else "?"
     if isinstance(exc, TelegramNetworkError):
-        logger.warning(f"Telegram network error: {exc}")
+        logger.warning(f"dispatch: update_id={update_id} telegram network error: {exc}")
         return
-    logger.error("Unhandled exception in update handler:", exc_info=exc)
+    logger.error(
+        f"dispatch: update_id={update_id} unhandled exception in update handler:",
+        exc_info=exc,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -455,14 +502,43 @@ async def dispatch_update(update: Update, bot: Bot, state: AppState) -> None:
     """Dispatch one update through the handler groups (PTB semantics).
 
     See the module docstring for the exact ordering/stop rules.
+
+    Logging: every update emits an entry line (update_id, kind, chat, user)
+    plus one line per matched handler and per stop/error decision, so the
+    full path of an update is traceable in Logfire. Per-spec filter
+    evaluations stay at DEBUG to bound volume.
     """
     kind = update_kind(update)
+    update_id = update.update_id
     if kind is None:
+        logger.info("dispatch: update_id=%s ignored (unsupported event type)", update_id)
         return
+
+    logger.info(
+        "dispatch: update_id=%s kind=%s chat=%s user_id=%s%s",
+        update_id,
+        kind,
+        _chat_label(update),
+        _update_user_id(update),
+        _command_suffix(update),
+    )
 
     context = HandlerContext(bot=bot, state=state)
 
-    for _group, specs in _grouped_specs(state):
+    grouped = _grouped_specs(state)
+    if not grouped:
+        logger.warning("dispatch: update_id=%s no handlers registered", update_id)
+        return
+
+    handled_any = False
+    for group, specs in grouped:
+        logger.debug(
+            "dispatch: update_id=%s evaluating group=%s (%d specs)",
+            update_id,
+            group,
+            len(specs),
+        )
+        matched_in_group = False
         for spec in specs:
             if kind not in spec.update_kinds:
                 continue
@@ -470,21 +546,58 @@ async def dispatch_update(update: Update, bot: Bot, state: AppState) -> None:
                 matched = spec.check(update)
             except Exception:
                 logger.warning(
-                    f"Filter error in handler '{spec.label}', skipping",
+                    "dispatch: update_id=%s filter error in handler '%s', skipping",
+                    update_id,
+                    spec.label,
                     exc_info=True,
                 )
                 continue
             if not matched:
+                logger.debug(
+                    "dispatch: update_id=%s handler '%s' filter did not match",
+                    update_id,
+                    spec.label,
+                )
                 continue
+            logger.info(
+                "dispatch: update_id=%s matched handler='%s' plugin='%s' group=%s",
+                update_id,
+                spec.label,
+                spec.plugin_name,
+                group,
+            )
             if spec.command is not None:
                 message = _message_or_none(update)
                 context.args = parse_command_args(message) if message else []
             try:
                 await spec.callback(update, context)
             except StopPropagation:
+                logger.info(
+                    "dispatch: update_id=%s StopPropagation raised by '%s', done",
+                    update_id,
+                    spec.label,
+                )
                 return
             except Exception as exc:  # noqa: BLE001 - PTB parity: route to error handler, try next
+                logger.info(
+                    "dispatch: update_id=%s handler '%s' raised %s, routed to error handler",
+                    update_id,
+                    spec.label,
+                    type(exc).__name__,
+                )
                 await handle_bot_error(update, exc)
                 continue
             # First matching handler wins within a group.
+            logger.info(
+                "dispatch: update_id=%s handler '%s' completed, first-match-wins for group=%s",
+                update_id,
+                spec.label,
+                group,
+            )
+            handled_any = True
+            matched_in_group = True
             break
+        if not matched_in_group:
+            logger.debug("dispatch: update_id=%s no match in group=%s", update_id, group)
+    if not handled_any:
+        logger.info("dispatch: update_id=%s unhandled by all groups", update_id)

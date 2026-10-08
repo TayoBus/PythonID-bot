@@ -191,6 +191,11 @@ def build_dispatcher() -> Dispatcher:
     ) -> None:
         # event_update is the full Update (aiogram sets it in _listen_update);
         # dispatch_update needs the Update wrapper, not the bare event.
+        logger.info(
+            "wiring: received update_id=%s via %s",
+            event_update.update_id,
+            type(event).__name__,
+        )
         await dispatch_update(event_update, bot, app_state)
 
     return dp
