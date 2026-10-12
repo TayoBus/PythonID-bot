@@ -365,3 +365,4 @@ if user.id not in context.state.admin_ids:
 ## Policy
 
 - Never mention AI usage, code generation tools, or automated assistance in commit messages, PR descriptions, code comments, or documentation
+- PR titles and descriptions are written in English
