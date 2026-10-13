@@ -328,7 +328,7 @@ if user.id not in context.state.admin_ids:
 - **uv**: installed via `astral-sh/setup-uv` (not `pip install uv`)
 - **Steps**: ruff → mypy → pytest (lint job always; test job runs when Python files changed)
 - **Mypy config**: Pragmatic, in `pyproject.toml [tool.mypy]`. Disables noisy error codes from aiogram / SQLModel / Pydantic v2 (`arg-type`, `attr-defined`, `index`, `union-attr`, `misc`, `return-value`, `call-arg`). New code should remain free of these errors
-- **Docker**: Multi-stage build with `uv`, non-root user, 512MB limit. Base image stays on `python:3.14-slim` until the official `python:3.15-slim` image is published (only rc tags existed as of 2026-10-12); bump `.python-version` together with the Dockerfile since `uv sync` resolves its interpreter from it
+- **Docker**: Multi-stage build with `uv`, non-root user, 512MB limit. Base image is `python:3.15-slim`; bump `.python-version` together with the Dockerfile since `uv sync` resolves its interpreter from it
 
 ## Where to Look (Plugin System)
 
