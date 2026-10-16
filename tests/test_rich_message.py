@@ -15,6 +15,7 @@ from aiogram.types import (
     RichMessage,
     RichMessageButton,
     RichTextBold,
+    RichTextButton,
     RichTextCustomEmoji,
     RichTextUrl,
     User,
@@ -25,9 +26,9 @@ from bot.group_config import GroupConfig
 from bot.handlers.ai_spam_monitor import _classifiable_text
 from bot.handlers.anti_spam import (
     handle_inline_keyboard_spam,
-    has_non_whitelisted_rich_message_urls,
+    has_rich_message_buttons,
 )
-from bot.services.rich_message import extract_rich_text, extract_rich_urls
+from bot.services.rich_message import extract_rich_text, extract_rich_urls, has_rich_buttons
 
 SPAM_URL = "https://t.me/base6d1ef16_bot?startapp=138762"
 
@@ -138,11 +139,50 @@ class TestExtractRichUrls:
         assert extract_rich_urls(_Boom()) == []
 
 
-class TestHasNonWhitelistedRichMessageUrls:
-    def test_spam_rich_message_detected(self):
-        assert has_non_whitelisted_rich_message_urls(_make_message(_spam_blocks())) is True
+class TestHasRichButtons:
+    def test_block_buttons_detected(self):
+        assert has_rich_buttons(RichMessage(blocks=_spam_blocks())) is True
 
-    def test_whitelisted_rich_urls_ignored(self):
+    def test_inline_text_button_detected(self):
+        blocks = [
+            RichBlockParagraph(
+                text=[
+                    "click ",
+                    RichTextButton(
+                        button=RichMessageButton(text="here", url="https://example.com")
+                    ),
+                ]
+            )
+        ]
+        assert has_rich_buttons(RichMessage(blocks=blocks)) is True
+
+    def test_no_buttons_returns_false(self):
+        blocks = [
+            RichBlockParagraph(
+                text=RichTextUrl(text="just a link", url="https://spam.example/x")
+            )
+        ]
+        assert has_rich_buttons(RichMessage(blocks=blocks)) is False
+
+    def test_none_returns_false(self):
+        assert has_rich_buttons(None) is False
+
+    def test_walk_failure_returns_false(self):
+        class _Boom:
+            @property
+            def buttons(self):
+                raise RuntimeError("boom")
+
+        assert has_rich_buttons(_Boom()) is False
+
+
+class TestHasRichMessageButtons:
+    def test_spam_rich_message_detected(self):
+        assert has_rich_message_buttons(_make_message(_spam_blocks())) is True
+
+    def test_buttons_with_whitelisted_urls_still_detected(self):
+        # Buttons are the trigger, not the URL: no stock client can
+        # compose them, so even whitelisted targets mean automation.
         blocks = [
             RichBlockButtons(
                 buttons=[
@@ -152,14 +192,20 @@ class TestHasNonWhitelistedRichMessageUrls:
                 ]
             )
         ]
-        assert has_non_whitelisted_rich_message_urls(_make_message(blocks)) is False
+        assert has_rich_message_buttons(_make_message(blocks)) is True
 
     def test_no_rich_message_ignored(self):
-        assert has_non_whitelisted_rich_message_urls(_make_message()) is False
+        assert has_rich_message_buttons(_make_message()) is False
 
-    def test_rich_without_urls_ignored(self):
-        blocks = [RichBlockParagraph(text="just text, no links")]
-        assert has_non_whitelisted_rich_message_urls(_make_message(blocks)) is False
+    def test_rich_without_buttons_ignored(self):
+        # URL-only rich content goes to the AI monitor, mirroring how
+        # plain text links are handled.
+        blocks = [
+            RichBlockParagraph(
+                text=RichTextUrl(text="shady link", url="https://spam.example/x")
+            )
+        ]
+        assert has_rich_message_buttons(_make_message(blocks)) is False
 
 
 class TestClassifiableTextRich:
@@ -241,11 +287,13 @@ class TestHandleInlineKeyboardSpamRich:
         mock_context.bot.restrict_chat_member.assert_called_once()
         mock_context.bot.send_message.assert_called_once()
         sent_text = mock_context.bot.send_message.call_args.kwargs["text"]
-        assert "rich text" in sent_text
+        assert "tombol pada pesan rich text" in sent_text
 
-    async def test_whitelisted_rich_urls_ignored(
+    async def test_buttons_with_whitelisted_urls_still_deleted(
         self, mock_update, mock_context, group_config
     ):
+        # Buttons are the trigger: no stock client can compose them, so the
+        # URL whitelist does not apply to rich message buttons.
         mock_update.message.rich_message = RichMessage(
             blocks=[
                 RichBlockButtons(
@@ -254,6 +302,28 @@ class TestHandleInlineKeyboardSpamRich:
                             text="Docs", url="https://docs.python.org/3/library/"
                         )
                     ]
+                )
+            ]
+        )
+
+        with patch(
+            "bot.handlers.anti_spam.get_group_config_for_update",
+            return_value=group_config,
+        ):
+            with pytest.raises(StopPropagation):
+                await handle_inline_keyboard_spam(mock_update, mock_context)
+
+        mock_update.message.delete.assert_called_once()
+        mock_context.bot.restrict_chat_member.assert_called_once()
+
+    async def test_rich_without_buttons_ignored(
+        self, mock_update, mock_context, group_config
+    ):
+        # URL-only rich content is left to the AI monitor, like plain text.
+        mock_update.message.rich_message = RichMessage(
+            blocks=[
+                RichBlockParagraph(
+                    text=RichTextUrl(text="shady link", url="https://spam.example/x")
                 )
             ]
         )

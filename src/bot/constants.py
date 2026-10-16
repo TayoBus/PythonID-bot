@@ -365,7 +365,8 @@ INLINE_KEYBOARD_SPAM_NOTIFICATION_NO_RESTRICT = (
 RICH_MESSAGE_SPAM_NOTIFICATION = (
     "🚫 *Spam Terdeteksi*\n\n"
     "Pesan dari {user_mention} telah dihapus karena mengandung "
-    "pesan rich text dengan tautan mencurigakan.\n\n"
+    "tombol pada pesan rich text (tombol tidak dapat dibuat dari "
+    "aplikasi Telegram biasa).\n\n"
     "Pengguna telah dibatasi.\n\n"
     "📌 [Peraturan Grup]({rules_link})"
 )
@@ -373,7 +374,8 @@ RICH_MESSAGE_SPAM_NOTIFICATION = (
 RICH_MESSAGE_SPAM_NOTIFICATION_NO_RESTRICT = (
     "🚫 *Spam Terdeteksi*\n\n"
     "Pesan dari {user_mention} telah dihapus karena mengandung "
-    "pesan rich text dengan tautan mencurigakan.\n\n"
+    "tombol pada pesan rich text (tombol tidak dapat dibuat dari "
+    "aplikasi Telegram biasa).\n\n"
     "📌 [Peraturan Grup]({rules_link})"
 )
 

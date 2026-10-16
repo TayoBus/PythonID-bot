@@ -87,3 +87,50 @@ def extract_rich_urls(rich_message: Any | None) -> list[str]:
         logger.warning("extract_rich_urls: failed to walk rich message", exc_info=True)
         return []
     return list(dict.fromkeys(urls))
+
+
+def has_rich_buttons(rich_message: Any | None) -> bool:
+    """Return True if a rich message contains any buttons.
+
+    Buttons appear as ``RichBlockButtons`` blocks or as inline
+    ``RichTextButton`` nodes in rich text. No stock Telegram client can
+    compose buttons, so their presence marks the message as
+    automation-crafted — the same rationale as the inline keyboard spam
+    rule.
+
+    The check is duck-typed (block containers plus the inline button
+    class name) so new button-carrying variants do not silently slip
+    through.
+    """
+    if rich_message is None:
+        return False
+    found = False
+
+    def _visit(node: Any) -> None:
+        nonlocal found
+        if found or node is None or isinstance(node, str):
+            return
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                _visit(item)
+            return
+        if getattr(node, "buttons", None):
+            found = True
+            return
+        if type(node).__name__ == "RichTextButton":
+            found = True
+            return
+        for attr in ("text", "caption", "summary", "alternative_text",
+                     "blocks", "cells", "items"):
+            value = getattr(node, attr, None)
+            if value:
+                _visit(value)
+                if found:
+                    return
+
+    try:
+        _visit(rich_message)
+    except Exception:
+        logger.warning("has_rich_buttons: failed to walk rich message", exc_info=True)
+        return False
+    return found

@@ -4,7 +4,7 @@ Anti-spam handlers for group content moderation.
 This module enforces anti-spam rules including:
 - Contact card spam detection (all members)
 - Inline keyboard URL spam detection (all members)
-- Rich message URL spam detection (all members)
+- Rich message button spam detection (all members)
 - Probation enforcement for new users (forwards, links, external replies, stories, media)
 """
 
@@ -30,7 +30,7 @@ from bot.constants import (
 )
 from bot.database.service import get_database
 from bot.group_config import get_group_config_for_update
-from bot.services.rich_message import extract_rich_urls
+from bot.services.rich_message import has_rich_buttons
 from bot.services.telegram_utils import (
     get_user_mention,
     is_url_whitelisted,
@@ -225,22 +225,24 @@ def has_non_whitelisted_inline_keyboard_urls(message: Message) -> bool:
     return False
 
 
-def has_non_whitelisted_rich_message_urls(message: Message) -> bool:
-    """Check if a message's rich content carries non-whitelisted URLs.
+def has_rich_message_buttons(message: Message) -> bool:
+    """Check if a message's rich content contains any buttons.
 
-    Rich messages (``Message.rich_message``) cannot be composed from
-    regular Telegram clients either, so the same policy as inline
-    keyboard spam applies: URL buttons and text links pointing to
-    non-whitelisted domains are treated as spam.
+    No stock Telegram client can compose rich messages or their buttons —
+    they are only sendable via the Bot API (bots) or crafted over MTProto
+    (spammers), or forwarded. The same "not client-craftable" rationale as
+    inline keyboard spam applies: buttons in a group rich message from a
+    human sender are treated as spam, regardless of where the buttons
+    point. URL-only rich content without buttons is left to the AI
+    monitor, mirroring how plain text links are handled.
 
     Args:
         message: Telegram message to check.
 
     Returns:
-        bool: True if any rich block URL is not whitelisted.
+        bool: True if any rich block or inline text carries a button.
     """
-    urls = extract_rich_urls(getattr(message, "rich_message", None))
-    return any(not is_url_whitelisted(url) for url in urls)
+    return has_rich_buttons(getattr(message, "rich_message", None))
 
 
 def has_contact(message: Message) -> bool:
@@ -386,24 +388,24 @@ async def handle_inline_keyboard_spam(
     update: Update, context: HandlerContext
 ) -> None:
     """
-    Handle spam messages containing non-whitelisted URLs in buttons.
+    Handle spam messages with non-client-craftable buttons.
 
-    Regular users cannot create inline keyboards — or rich messages —
-    from the Telegram client. Any group message with inline keyboard
-    URL buttons or rich message blocks pointing to non-whitelisted
-    domains is treated as spam: the message is deleted and the sender
-    restricted.
+    Regular users cannot create inline keyboards — or rich message buttons —
+    from the Telegram client. Any group message with inline keyboard URL
+    buttons pointing to non-whitelisted domains, or with rich message
+    buttons at all, is treated as spam: the message is deleted and the
+    sender restricted.
 
     Args:
         update: Telegram update containing the message.
         context: Bot context with helper methods.
     """
     message = update.message or update.edited_message
-    if message is not None and has_non_whitelisted_rich_message_urls(message):
+    if message is not None and has_rich_message_buttons(message):
         await _handle_group_spam(
             update,
             context,
-            detector=has_non_whitelisted_rich_message_urls,
+            detector=has_rich_message_buttons,
             label="rich message spam",
             should_restrict=lambda cfg: True,
             template_restricted=RICH_MESSAGE_SPAM_NOTIFICATION,
