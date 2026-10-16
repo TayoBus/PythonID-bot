@@ -361,6 +361,22 @@ INLINE_KEYBOARD_SPAM_NOTIFICATION_NO_RESTRICT = (
     "📌 [Peraturan Grup]({rules_link})"
 )
 
+# Rich message spam notification
+RICH_MESSAGE_SPAM_NOTIFICATION = (
+    "🚫 *Spam Terdeteksi*\n\n"
+    "Pesan dari {user_mention} telah dihapus karena mengandung "
+    "pesan rich text dengan tautan mencurigakan.\n\n"
+    "Pengguna telah dibatasi.\n\n"
+    "📌 [Peraturan Grup]({rules_link})"
+)
+
+RICH_MESSAGE_SPAM_NOTIFICATION_NO_RESTRICT = (
+    "🚫 *Spam Terdeteksi*\n\n"
+    "Pesan dari {user_mention} telah dihapus karena mengandung "
+    "pesan rich text dengan tautan mencurigakan.\n\n"
+    "📌 [Peraturan Grup]({rules_link})"
+)
+
 # Contact spam notification
 CONTACT_SPAM_NOTIFICATION = (
     "🚫 *Kontak Dihapus*\n\n"

@@ -56,6 +56,7 @@ from bot.services.classifier_client import (
     daily_budget_exhausted,
     try_spend_budget,
 )
+from bot.services.rich_message import extract_rich_text, extract_rich_urls
 from bot.services.telegram_utils import (
     is_user_admin_in_group,
     is_user_admin_or_trusted,
@@ -66,8 +67,20 @@ from bot.services.user_checker import check_user_profile
 logger = logging.getLogger(__name__)
 
 def _classifiable_text(message: Message) -> str:
-    """Return the text available for classification: body text or media caption."""
-    return message.text or message.caption or ""
+    """Return the text available for classification.
+
+    Covers body text, media captions, and rich message content: rich
+    messages arrive with empty ``text`` while their payload (headings,
+    table cells, button labels and URLs) lives in ``rich_message``
+    blocks, so that content is extracted too.
+    """
+    parts = [message.text or "", message.caption or ""]
+    rich_message = getattr(message, "rich_message", None)
+    rich_text = extract_rich_text(rich_message)
+    if rich_text:
+        parts.append(rich_text)
+    parts.extend(extract_rich_urls(rich_message))
+    return " ".join(part for part in parts if part)
 
 
 def ai_spam_filter(update: Update) -> bool:
