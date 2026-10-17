@@ -41,7 +41,7 @@ def _url_shaped_candidates(text: str) -> list[str]:
             continue
         if hostname and "." in hostname:
             out.append(candidate)
-    return out
+    return list(dict.fromkeys(out))
 
 # Attributes that hold nested blocks, cells, buttons, or list items.
 # ``button`` is singular (``RichTextButton.button``); ``credit`` carries
