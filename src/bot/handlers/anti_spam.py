@@ -401,7 +401,13 @@ async def handle_inline_keyboard_spam(
         context: Bot context with helper methods.
     """
     message = update.message or update.edited_message
-    if message is not None and has_rich_message_buttons(message):
+    if message is None:
+        return
+    if getattr(message, "is_automatic_forward", False):
+        # Linked-channel auto-forwards are admin-configured; never punish
+        # the channel (or the 777000 service sender) for its content.
+        return
+    if has_rich_message_buttons(message):
         await _handle_group_spam(
             update,
             context,

@@ -20,9 +20,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Attributes that hold nested blocks, cells, buttons, or list items.
-_CONTAINER_ATTRS = ("blocks", "cells", "buttons", "items")
+# ``button`` is singular (``RichTextButton.button``); ``credit`` carries
+# rich text inside quotation/media captions (``RichBlockCaption.credit``).
+_CONTAINER_ATTRS = ("blocks", "cells", "buttons", "items", "button")
 # Text-bearing attributes besides the generic ``text``.
-_TEXT_ATTRS = ("caption", "summary", "alternative_text")
+_TEXT_ATTRS = ("caption", "summary", "alternative_text", "credit")
 
 
 def _walk(node: Any, texts: list[str], urls: list[str]) -> None:
@@ -120,8 +122,8 @@ def has_rich_buttons(rich_message: Any | None) -> bool:
         if type(node).__name__ == "RichTextButton":
             found = True
             return
-        for attr in ("text", "caption", "summary", "alternative_text",
-                     "blocks", "cells", "items"):
+        for attr in ("text", "caption", "summary", "alternative_text", "credit",
+                     "blocks", "cells", "items", "button"):
             value = getattr(node, attr, None)
             if value:
                 _visit(value)

@@ -9,6 +9,7 @@ from aiogram.types import (
     Message,
     RichBlockButtons,
     RichBlockParagraph,
+    RichBlockPullQuotation,
     RichBlockSectionHeading,
     RichBlockTable,
     RichBlockTableCell,
@@ -105,6 +106,29 @@ class TestExtractRichText:
         )
         assert text == "hello world"
 
+    def test_quotation_credit_included(self):
+        blocks = [
+            RichBlockPullQuotation(text="a wise quote", credit="— cited source")
+        ]
+        text = extract_rich_text(RichMessage(blocks=blocks))
+        assert "a wise quote" in text
+        assert "cited source" in text
+
+    def test_inline_text_button_content_included(self):
+        blocks = [
+            RichBlockParagraph(
+                text=[
+                    "tap ",
+                    RichTextButton(
+                        button=RichMessageButton(text="here", url=SPAM_URL)
+                    ),
+                ]
+            )
+        ]
+        text = extract_rich_text(RichMessage(blocks=blocks))
+        assert "tap" in text
+        assert "here" in text
+
     def test_walk_failure_returns_empty(self):
         class _Boom:
             @property
@@ -118,6 +142,16 @@ class TestExtractRichUrls:
     def test_extracts_button_and_text_link_urls_deduped(self):
         urls = extract_rich_urls(RichMessage(blocks=_spam_blocks()))
         assert urls == [SPAM_URL]
+
+    def test_inline_text_button_url_extracted(self):
+        blocks = [
+            RichBlockParagraph(
+                text=RichTextButton(
+                    button=RichMessageButton(text="here", url=SPAM_URL)
+                )
+            )
+        ]
+        assert extract_rich_urls(RichMessage(blocks=blocks)) == [SPAM_URL]
 
     def test_none_returns_empty(self):
         assert extract_rich_urls(None) == []
@@ -163,6 +197,17 @@ class TestHasRichButtons:
             )
         ]
         assert has_rich_buttons(RichMessage(blocks=blocks)) is False
+
+    def test_button_inside_credit_detected(self):
+        blocks = [
+            RichBlockPullQuotation(
+                text="a wise quote",
+                credit=RichTextButton(
+                    button=RichMessageButton(text="source", url=SPAM_URL)
+                ),
+            )
+        ]
+        assert has_rich_buttons(RichMessage(blocks=blocks)) is True
 
     def test_none_returns_false(self):
         assert has_rich_buttons(None) is False
@@ -347,3 +392,20 @@ class TestHandleInlineKeyboardSpamRich:
             await handle_inline_keyboard_spam(mock_update, mock_context)
 
         mock_update.message.delete.assert_not_called()
+
+    async def test_automatic_forward_skipped(
+        self, mock_update, mock_context, group_config
+    ):
+        # Linked-channel auto-forwards are admin-configured: never punish
+        # the channel for rich buttons in its posts.
+        mock_update.message.rich_message = RichMessage(blocks=_spam_blocks())
+        mock_update.message.is_automatic_forward = True
+
+        with patch(
+            "bot.handlers.anti_spam.get_group_config_for_update",
+            return_value=group_config,
+        ):
+            await handle_inline_keyboard_spam(mock_update, mock_context)
+
+        mock_update.message.delete.assert_not_called()
+        mock_context.bot.restrict_chat_member.assert_not_called()
