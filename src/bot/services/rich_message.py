@@ -69,14 +69,38 @@ _PAYLOAD_ATTRS = (
 # Nesting deeper than this cannot occur in genuine payloads (Telegram
 # documents depth <= 16 for sending); deeper trees are treated as hostile.
 _MAX_WALK_DEPTH = 64
+# Total nodes visited per walk. Depth alone cannot bound the walk: an
+# object with every attribute truthy (e.g. unittest mocks, or hostile
+# crafted objects) branches exponentially, so the visited-node count
+# is capped as well. Genuine payloads stay far below this.
+_MAX_WALK_NODES = 10_000
+
+
+def _is_rich_node(value: Any) -> bool:
+    """Check whether a value is a traversable rich object.
+
+    Rich nodes always come from aiogram's parser. Anything else —
+    mocks, foreign objects, hostile lookalikes — is not content and
+    must not be descended into (mocks in particular generate infinite
+    attribute trees).
+    """
+    return type(value).__module__.split(".")[0] == "aiogram"
 
 
 def _walk(
-    node: Any, texts: list[str], urls: list[str], depth: int = 0
+    node: Any,
+    texts: list[str],
+    urls: list[str],
+    depth: int = 0,
+    budget: list[int] | None = None,
 ) -> None:
     """Recursively collect text fragments and URLs from a rich node."""
     if node is None or depth > _MAX_WALK_DEPTH:
         return
+    if budget is not None:
+        if budget[0] <= 0:
+            return
+        budget[0] -= 1
     if isinstance(node, str):
         stripped = node.strip()
         if stripped:
@@ -84,7 +108,9 @@ def _walk(
         return
     if isinstance(node, (list, tuple)):
         for item in node:
-            _walk(item, texts, urls, depth + 1)
+            _walk(item, texts, urls, depth + 1, budget)
+        return
+    if not _is_rich_node(node):
         return
 
     url = getattr(node, "url", None)
@@ -93,17 +119,17 @@ def _walk(
     for attr in _PAYLOAD_ATTRS:
         value = getattr(node, attr, None)
         if value is not None:
-            _walk(value, texts, urls, depth + 1)
+            _walk(value, texts, urls, depth + 1, budget)
 
     for attr in ("text",) + _TEXT_ATTRS:
         value = getattr(node, attr, None)
         if value is not None:
-            _walk(value, texts, urls, depth + 1)
+            _walk(value, texts, urls, depth + 1, budget)
 
     for attr in _CONTAINER_ATTRS:
         value = getattr(node, attr, None)
         if value:
-            _walk(value, texts, urls, depth + 1)
+            _walk(value, texts, urls, depth + 1, budget)
 
 
 def extract_rich_text(rich_message: Any | None) -> str:
@@ -117,7 +143,7 @@ def extract_rich_text(rich_message: Any | None) -> str:
         return ""
     texts: list[str] = []
     try:
-        _walk(rich_message, texts, [])
+        _walk(rich_message, texts, [], 0, [_MAX_WALK_NODES])
     except Exception:
         logger.info("extract_rich_text: failed to walk rich message")
         return ""
@@ -137,7 +163,7 @@ def extract_rich_urls(rich_message: Any | None) -> list[str]:
     urls: list[str] = []
     texts: list[str] = []
     try:
-        _walk(rich_message, texts, urls)
+        _walk(rich_message, texts, urls, 0, [_MAX_WALK_NODES])
     except Exception:
         logger.info("extract_rich_urls: failed to walk rich message")
         return []
@@ -162,19 +188,24 @@ def has_rich_buttons(rich_message: Any | None) -> bool:
     if rich_message is None:
         return False
     found = False
+    budget = [_MAX_WALK_NODES]
 
     def _visit(node: Any, depth: int = 0) -> None:
         nonlocal found
         if found or node is None or isinstance(node, str):
             return
-        if depth > _MAX_WALK_DEPTH:
-            # Absurd nesting is only craftable, never client-composed:
-            # treat as suspicious rather than failing open.
+        if depth > _MAX_WALK_DEPTH or budget[0] <= 0:
+            # Absurd nesting or an exploding attribute tree is only
+            # craftable, never client-composed: treat as suspicious
+            # rather than failing open.
             found = True
             return
+        budget[0] -= 1
         if isinstance(node, (list, tuple)):
             for item in node:
                 _visit(item, depth + 1)
+            return
+        if not _is_rich_node(node):
             return
         if getattr(node, "buttons", None):
             found = True
