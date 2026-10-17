@@ -6,8 +6,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.types import (
     Chat,
+    CopyTextButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    LoginUrl,
     Message,
     RichBlockButtons,
+    RichBlockList,
+    RichBlockListItem,
     RichBlockParagraph,
     RichBlockPullQuotation,
     RichBlockSectionHeading,
@@ -19,12 +25,18 @@ from aiogram.types import (
     RichTextButton,
     RichTextCustomEmoji,
     RichTextUrl,
+    Update,
     User,
+    WebAppInfo,
 )
 
 from bot.dispatch import AppState, HandlerContext, StopPropagation
 from bot.group_config import GroupConfig
-from bot.handlers.ai_spam_monitor import _classifiable_text
+from bot.handlers import ai_spam_monitor
+from bot.handlers.ai_spam_monitor import (
+    AI_SPAM_CLASSIFY_MAX_LEN,
+    _classifiable_text,
+)
 from bot.handlers.anti_spam import (
     handle_inline_keyboard_spam,
     has_non_whitelisted_link,
@@ -153,6 +165,16 @@ class TestExtractRichUrls:
             )
         ]
         assert extract_rich_urls(RichMessage(blocks=blocks)) == [SPAM_URL]
+
+    def test_bare_url_in_paragraph_detected(self):
+        blocks = [RichBlockParagraph(text="visit https://spam.example/deal now")]
+        assert extract_rich_urls(RichMessage(blocks=blocks)) == [
+            "https://spam.example/deal"
+        ]
+
+    def test_url_fragment_without_host_ignored(self):
+        blocks = [RichBlockParagraph(text="learn about the https:// protocol")]
+        assert extract_rich_urls(RichMessage(blocks=blocks)) == []
 
     def test_none_returns_empty(self):
         assert extract_rich_urls(None) == []
@@ -444,3 +466,269 @@ class TestHandleInlineKeyboardSpamRich:
 
         mock_update.message.delete.assert_not_called()
         mock_context.bot.restrict_chat_member.assert_not_called()
+
+
+def _make_update(blocks=None, text=None):
+    return Update(
+        update_id=1,
+        message=Message(
+            message_id=1,
+            date=datetime.now(UTC),
+            chat=Chat(id=-100, type="supergroup"),
+            from_user=User(id=7, is_bot=False, first_name="U"),
+            text=text,
+            rich_message=RichMessage(blocks=blocks) if blocks is not None else None,
+        ),
+    )
+
+
+class TestRichWalkerGaps:
+    """Walker coverage for list labels, payload sub-objects, depth."""
+
+    def test_list_item_label_extracted(self):
+        blocks = [
+            RichBlockList(
+                items=[
+                    RichBlockListItem(
+                        label="PROMO SPESIAL HARI INI",
+                        blocks=[RichBlockParagraph(text="detail")],
+                    )
+                ]
+            )
+        ]
+        text = extract_rich_text(RichMessage(blocks=blocks))
+        assert "PROMO SPESIAL HARI INI" in text
+
+    def test_copy_text_payload_extracted(self):
+        blocks = [
+            RichBlockButtons(
+                buttons=[
+                    RichMessageButton(
+                        text="copy",
+                        copy_text=CopyTextButton(text="https://spam.example/steal"),
+                    )
+                ]
+            )
+        ]
+        assert extract_rich_urls(RichMessage(blocks=blocks)) == [
+            "https://spam.example/steal"
+        ]
+        assert has_rich_buttons(RichMessage(blocks=blocks)) is True
+
+    def test_login_url_and_web_app_extracted(self):
+        blocks = [
+            RichBlockButtons(
+                buttons=[
+                    RichMessageButton(
+                        text="login",
+                        login_url=LoginUrl(
+                            url="https://spam.example/login",
+                            forward_text="open login",
+                        ),
+                    ),
+                    RichMessageButton(
+                        text="app",
+                        web_app=WebAppInfo(url="https://spam.example/app"),
+                    ),
+                ]
+            )
+        ]
+        urls = extract_rich_urls(RichMessage(blocks=blocks))
+        assert urls == ["https://spam.example/login", "https://spam.example/app"]
+        assert "open login" in extract_rich_text(RichMessage(blocks=blocks))
+
+    def test_credit_nested_button_url_extracted(self):
+        blocks = [
+            RichBlockPullQuotation(
+                text="a wise quote",
+                credit=RichTextButton(
+                    button=RichMessageButton(text="source", url=SPAM_URL)
+                ),
+            )
+        ]
+        assert extract_rich_urls(RichMessage(blocks=blocks)) == [SPAM_URL]
+
+    def test_deep_nesting_buttons_fail_closed(self):
+        node = ["deep"]
+        for _ in range(3000):
+            node = [node]
+        assert has_rich_buttons(node) is True
+
+    def test_deep_nesting_extract_terminates(self):
+        node = ["deep"]
+        for _ in range(3000):
+            node = [node]
+        assert extract_rich_text(node) == ""
+        assert extract_rich_urls(node) == []
+
+
+class TestAiSpamFilterRich:
+    def test_rich_only_message_matches(self):
+        update = _make_update(
+            [RichBlockParagraph(text="this is a rich-only message with buttons")]
+        )
+        assert ai_spam_monitor.AI_SPAM_FILTER(update) is True
+
+    def test_rich_empty_no_match(self):
+        update = _make_update([])
+        assert ai_spam_monitor.AI_SPAM_FILTER(update) is False
+
+    def test_no_rich_no_match(self):
+        assert ai_spam_monitor.AI_SPAM_FILTER(_make_update()) is False
+
+
+class TestClassifyTruncation:
+    async def test_long_input_truncated_before_classify(self):
+        captured = {}
+
+        async def fake_classify(text, **kwargs):
+            captured["text"] = text
+            return None
+
+        settings = MagicMock()
+        settings.classifier_cooldown_seconds = 600
+        settings.classifier_timeout_seconds = 10
+        settings.ai_spam_daily_budget = 15000
+        context = HandlerContext(bot=MagicMock(), state=AppState(), args=[])
+        user = User(id=1, is_bot=False, first_name="T")
+        with (
+            patch("bot.handlers.ai_spam_monitor.classify_text", new=fake_classify),
+            patch(
+                "bot.handlers.ai_spam_monitor.get_settings", return_value=settings
+            ),
+            patch(
+                "bot.handlers.ai_spam_monitor.breaker_is_open", return_value=False
+            ),
+            patch(
+                "bot.handlers.ai_spam_monitor.try_spend_budget", return_value=True
+            ),
+        ):
+            await ai_spam_monitor._classify_and_alert(
+                context,
+                group_id=-100,
+                user=user,
+                message_id=1,
+                message_text="x" * 20000,
+            )
+        assert len(captured["text"]) == AI_SPAM_CLASSIFY_MAX_LEN
+
+
+class TestInlineKeyboardAutoForward:
+    """The is_automatic_forward guard covers the pre-existing keyboard path too."""
+
+    @pytest.fixture
+    def mock_update(self):
+        update = MagicMock()
+        update.message = MagicMock(spec=Message)
+        update.message.from_user = MagicMock(spec=User)
+        update.message.from_user.id = 12345
+        update.message.from_user.is_bot = False
+        update.message.from_user.full_name = "Spam User"
+        update.message.from_user.username = "spamuser"
+        update.message.delete = AsyncMock()
+        update.message.reply_markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="x", url="https://evil.example/")]
+            ]
+        )
+        update.message.rich_message = None
+        update.message.is_automatic_forward = True
+        update.edited_message = None
+        return update
+
+    @pytest.fixture
+    def mock_context(self):
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.restrict_chat_member = AsyncMock()
+        state = AppState()
+        state.group_admin_ids = {}
+        state.trusted_user_ids = set()
+        return HandlerContext(bot=bot, state=state, args=[])
+
+    @pytest.fixture
+    def group_config(self):
+        return GroupConfig(
+            group_id=-100123456,
+            warning_topic_id=123,
+            rules_link="https://example.com/rules",
+        )
+
+    async def test_keyboard_auto_forward_skipped(
+        self, mock_update, mock_context, group_config
+    ):
+        with patch(
+            "bot.handlers.anti_spam.get_group_config_for_update",
+            return_value=group_config,
+        ):
+            await handle_inline_keyboard_spam(mock_update, mock_context)
+
+        mock_update.message.delete.assert_not_called()
+        mock_context.bot.restrict_chat_member.assert_not_called()
+
+
+class TestRichNoRestrictAndExemptions:
+    @pytest.fixture
+    def mock_update(self):
+        update = MagicMock()
+        update.message = MagicMock(spec=Message)
+        update.message.from_user = MagicMock(spec=User)
+        update.message.from_user.id = 12345
+        update.message.from_user.is_bot = False
+        update.message.from_user.full_name = "Spam User"
+        update.message.from_user.username = "spamuser"
+        update.message.delete = AsyncMock()
+        update.message.reply_markup = None
+        update.message.rich_message = RichMessage(blocks=_spam_blocks())
+        update.message.is_automatic_forward = False
+        update.edited_message = None
+        return update
+
+    @pytest.fixture
+    def mock_context(self):
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        bot.restrict_chat_member = AsyncMock()
+        state = AppState()
+        state.group_admin_ids = {}
+        state.trusted_user_ids = set()
+        return HandlerContext(bot=bot, state=state, args=[])
+
+    @pytest.fixture
+    def group_config(self):
+        return GroupConfig(
+            group_id=-100123456,
+            warning_topic_id=123,
+            rules_link="https://example.com/rules",
+        )
+
+    async def test_no_restrict_template_on_failure(
+        self, mock_update, mock_context, group_config
+    ):
+        mock_context.bot.restrict_chat_member = AsyncMock(
+            side_effect=Exception("Restrict failed")
+        )
+        with patch(
+            "bot.handlers.anti_spam.get_group_config_for_update",
+            return_value=group_config,
+        ):
+            with pytest.raises(StopPropagation):
+                await handle_inline_keyboard_spam(mock_update, mock_context)
+
+        text = mock_context.bot.send_message.call_args.kwargs["text"]
+        assert "dibatasi" not in text
+        assert "tombol pada pesan rich text" in text
+
+    async def test_admin_exempt_from_rich_delete(
+        self, mock_update, mock_context, group_config
+    ):
+        mock_context.state.group_admin_ids = {
+            group_config.group_id: [mock_update.message.from_user.id]
+        }
+        with patch(
+            "bot.handlers.anti_spam.get_group_config_for_update",
+            return_value=group_config,
+        ):
+            await handle_inline_keyboard_spam(mock_update, mock_context)
+
+        mock_update.message.delete.assert_not_called()
