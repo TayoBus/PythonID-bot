@@ -352,6 +352,7 @@ class TestHandleInlineKeyboardSpamRich:
         update.message.from_user.username = "spamuser"
         update.message.delete = AsyncMock()
         update.message.reply_markup = None
+        update.message.forward_origin = None
         update.edited_message = None
         return update
 
@@ -633,6 +634,7 @@ class TestInlineKeyboardAutoForward:
         )
         update.message.rich_message = None
         update.message.is_automatic_forward = True
+        update.message.forward_origin = None
         update.edited_message = None
         return update
 
@@ -681,6 +683,7 @@ class TestRichNoRestrictAndExemptions:
         update.message.reply_markup = None
         update.message.rich_message = RichMessage(blocks=_spam_blocks())
         update.message.is_automatic_forward = False
+        update.message.forward_origin = None
         update.edited_message = None
         return update
 
@@ -732,3 +735,34 @@ class TestRichNoRestrictAndExemptions:
             await handle_inline_keyboard_spam(mock_update, mock_context)
 
         mock_update.message.delete.assert_not_called()
+
+    async def _notification_text(
+        self, mock_update, mock_context, group_config, forwarded: bool
+    ) -> str:
+        mock_update.message.forward_origin = MagicMock() if forwarded else None
+        with patch(
+            "bot.handlers.anti_spam.get_group_config_for_update",
+            return_value=group_config,
+        ):
+            with pytest.raises(StopPropagation):
+                await handle_inline_keyboard_spam(mock_update, mock_context)
+        return mock_context.bot.send_message.call_args.kwargs["text"]
+
+    async def test_forwarded_wording_and_appeal_line(
+        self, mock_update, mock_context, group_config
+    ):
+        text = await self._notification_text(
+            mock_update, mock_context, group_config, forwarded=True
+        )
+        assert "Pesan terusan dari" in text
+        assert "Hubungi admin grup" in text
+
+    async def test_non_forwarded_wording_and_appeal_line(
+        self, mock_update, mock_context, group_config
+    ):
+        text = await self._notification_text(
+            mock_update, mock_context, group_config, forwarded=False
+        )
+        assert "Pesan dari" in text
+        assert "Pesan terusan" not in text
+        assert "Hubungi admin grup" in text

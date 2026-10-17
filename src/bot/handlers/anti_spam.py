@@ -272,6 +272,7 @@ async def _handle_group_spam(
     should_restrict,
     template_restricted: str,
     template_no_restrict: str,
+    extra_format: dict[str, str] | None = None,
 ) -> None:
     """
     Shared helper for handling group spam detection and enforcement.
@@ -287,6 +288,7 @@ async def _handle_group_spam(
         should_restrict: Callable taking group_config and returning bool.
         template_restricted: Notification template when user is restricted.
         template_no_restrict: Notification template when user is not restricted.
+        extra_format: Additional template placeholders (e.g. forward_note).
     """
     message = update.message or update.edited_message
     if not message or not message.from_user:
@@ -348,6 +350,7 @@ async def _handle_group_spam(
         notification_text = template.format(
             user_mention=user_mention,
             rules_link=group_config.rules_link,
+            **(extra_format or {}),
         )
         await context.bot.send_message(
             chat_id=group_config.group_id,
@@ -421,6 +424,9 @@ async def handle_inline_keyboard_spam(
             should_restrict=lambda cfg: True,
             template_restricted=RICH_MESSAGE_SPAM_NOTIFICATION,
             template_no_restrict=RICH_MESSAGE_SPAM_NOTIFICATION_NO_RESTRICT,
+            extra_format={
+                "forward_note": " terusan" if is_forwarded(message) else ""
+            },
         )
         return
     await _handle_group_spam(
