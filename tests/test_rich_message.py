@@ -27,6 +27,7 @@ from bot.group_config import GroupConfig
 from bot.handlers.ai_spam_monitor import _classifiable_text
 from bot.handlers.anti_spam import (
     handle_inline_keyboard_spam,
+    has_non_whitelisted_link,
     has_rich_message_buttons,
 )
 from bot.services.rich_message import extract_rich_text, extract_rich_urls, has_rich_buttons
@@ -251,6 +252,40 @@ class TestHasRichMessageButtons:
             )
         ]
         assert has_rich_message_buttons(_make_message(blocks)) is False
+
+
+class TestHasNonWhitelistedLinkRich:
+    """Probation link check also sees URLs hidden in rich blocks."""
+
+    def test_rich_text_link_detected(self):
+        blocks = [
+            RichBlockParagraph(
+                text=RichTextUrl(text="shady link", url="https://spam.example/x")
+            )
+        ]
+        assert has_non_whitelisted_link(_make_message(blocks)) is True
+
+    def test_rich_button_url_detected(self):
+        blocks = [
+            RichBlockButtons(
+                buttons=[RichMessageButton(text="OPEN", url=SPAM_URL)]
+            )
+        ]
+        assert has_non_whitelisted_link(_make_message(blocks)) is True
+
+    def test_rich_whitelisted_url_ignored(self):
+        blocks = [
+            RichBlockParagraph(
+                text=RichTextUrl(
+                    text="docs", url="https://docs.python.org/3/library/"
+                )
+            )
+        ]
+        assert has_non_whitelisted_link(_make_message(blocks)) is False
+
+    def test_rich_without_urls_ignored(self):
+        blocks = [RichBlockParagraph(text="just text, no links")]
+        assert has_non_whitelisted_link(_make_message(blocks)) is False
 
 
 class TestClassifiableTextRich:

@@ -30,7 +30,7 @@ from bot.constants import (
 )
 from bot.database.service import get_database
 from bot.group_config import get_group_config_for_update
-from bot.services.rich_message import has_rich_buttons
+from bot.services.rich_message import extract_rich_urls, has_rich_buttons
 from bot.services.telegram_utils import (
     get_user_mention,
     is_url_whitelisted,
@@ -163,6 +163,10 @@ def has_non_whitelisted_link(message: Message) -> bool:
     """
     Check if a message contains non-whitelisted URLs.
 
+    Covers URLs in text/caption entities as well as URLs hidden in rich
+    message blocks, so probation users cannot smuggle links past the
+    filter inside rich text.
+
     Args:
         message: Telegram message to check.
 
@@ -170,6 +174,7 @@ def has_non_whitelisted_link(message: Message) -> bool:
         bool: True if message contains non-whitelisted links.
     """
     urls = extract_urls(message)
+    urls.extend(extract_rich_urls(getattr(message, "rich_message", None)))
     if not urls:
         return False
 
