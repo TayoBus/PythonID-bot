@@ -263,12 +263,20 @@ class TestHandleAiSpamMonitor:
 class TestAiSpamInstructions:
     """Classifier criteria must cover gambling recruitment in any language."""
 
-    def test_covers_gambling_and_mandarin_recruitment(self):
-        assert "Spam juga termasuk ajakan judi atau permainan uang" in AI_SPAM_INSTRUCTIONS
-        assert "poker/Texas Holdem (德州扑克)" in AI_SPAM_INSTRUCTIONS
-        assert "德州缺一个人" in AI_SPAM_INSTRUCTIONS
-        assert "开速" in AI_SPAM_INSTRUCTIONS
-        assert "dalam bahasa apa pun termasuk Mandarin" in AI_SPAM_INSTRUCTIONS
+    def test_covers_gambling_recruitment_in_any_language(self):
+        assert (
+            "promosi judi, permainan uang, atau taruhan dalam bahasa apa pun"
+            in AI_SPAM_INSTRUCTIONS
+        )
+        assert "rekrutmen pemain" in AI_SPAM_INSTRUCTIONS
+        assert "kekurangan pemain" in AI_SPAM_INSTRUCTIONS
+        assert "poker dan Texas Hold'em" in AI_SPAM_INSTRUCTIONS
+
+    def test_has_no_language_specific_examples(self):
+        assert "Mandarin" not in AI_SPAM_INSTRUCTIONS
+        assert "德州" not in AI_SPAM_INSTRUCTIONS
+        assert "德州缺一个人" not in AI_SPAM_INSTRUCTIONS
+        assert "开速" not in AI_SPAM_INSTRUCTIONS
 
     def test_keeps_benign_anchor(self):
         assert "adalah benign" in AI_SPAM_INSTRUCTIONS
