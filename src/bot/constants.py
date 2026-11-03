@@ -501,7 +501,13 @@ AI_SPAM_INSTRUCTIONS = (
     "link atau ajakan ke konten dewasa. Doxxing berarti membagikan data "
     "pribadi orang lain tanpa izin: nomor telepon, alamat, foto KTP, atau "
     "identitas pribadi lainnya. Pengumuman acara komunitas, diskusi "
-    "teknis, tanya jawab, dan obrolan sehari-hari yang sopan adalah benign."
+    "teknis, tanya jawab, dan obrolan sehari-hari yang sopan adalah benign. "
+    "Spam juga termasuk ajakan judi atau permainan uang, rekrutmen pemain "
+    "poker/Texas Holdem (德州扑克), dan ajakan menghubungi seseorang untuk "
+    "bergabung dalam permainan, dalam bahasa apa pun termasuk Mandarin. "
+    "Ajakan judi dalam bahasa Mandarin termasuk frasa rekrutmen seperti "
+    "德州缺一个人 (kekurangan satu pemain Texas Holdem), 开速 (segera mulai "
+    "permainan), dan ajakan menghubungi username untuk bergabung."
 )
 
 # Alert sent to ai_spam_alert_chat_id when a high-confidence moderation

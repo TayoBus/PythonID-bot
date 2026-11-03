@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.exceptions import TelegramBadRequest
 
+from bot.constants import AI_SPAM_INSTRUCTIONS
 from bot.dispatch import AppState, HandlerContext
 
 from bot.group_config import GroupConfig
@@ -194,6 +195,26 @@ class TestHandleAiSpamMonitor:
         context.create_task.assert_not_called()
 
     @patch("bot.handlers.ai_spam_monitor.get_settings")
+    async def test_spawns_task_for_short_cjk_recruitment_text(self, mock_settings, context):
+        # 19 chars: the 2026-11-03 poker-recruitment message that the
+        # old 20-char gate never sent to the classifier.
+        mock_settings.return_value = make_settings()
+        update = make_update(text="德州缺一个人，马上开速来 @okde2")
+        assert len("德州缺一个人，马上开速来 @okde2") == 19
+        await handle_ai_spam_monitor(update, context)
+        context.create_task.assert_called_once()
+
+    @patch("bot.handlers.ai_spam_monitor.get_settings")
+    async def test_min_length_boundary(self, mock_settings, context):
+        mock_settings.return_value = make_settings()
+        below = "x" * (ai_spam_monitor.AI_SPAM_MIN_LENGTH - 1)
+        await handle_ai_spam_monitor(make_update(text=below), context)
+        context.create_task.assert_not_called()
+        at_threshold = "x" * ai_spam_monitor.AI_SPAM_MIN_LENGTH
+        await handle_ai_spam_monitor(make_update(text=at_threshold), context)
+        context.create_task.assert_called_once()
+
+    @patch("bot.handlers.ai_spam_monitor.get_settings")
     async def test_skips_bot_user(self, mock_settings, context):
         mock_settings.return_value = make_settings()
         update = make_update(user_id=99, is_bot=True)
@@ -237,6 +258,20 @@ class TestHandleAiSpamMonitor:
         update = make_update()
         await handle_ai_spam_monitor(update, context)
         context.create_task.assert_not_called()
+
+
+class TestAiSpamInstructions:
+    """Classifier criteria must cover gambling recruitment in any language."""
+
+    def test_covers_gambling_and_mandarin_recruitment(self):
+        assert "Spam juga termasuk ajakan judi atau permainan uang" in AI_SPAM_INSTRUCTIONS
+        assert "poker/Texas Holdem (德州扑克)" in AI_SPAM_INSTRUCTIONS
+        assert "德州缺一个人" in AI_SPAM_INSTRUCTIONS
+        assert "开速" in AI_SPAM_INSTRUCTIONS
+        assert "dalam bahasa apa pun termasuk Mandarin" in AI_SPAM_INSTRUCTIONS
+
+    def test_keeps_benign_anchor(self):
+        assert "adalah benign" in AI_SPAM_INSTRUCTIONS
 
 
 class TestAiSpamFilter:

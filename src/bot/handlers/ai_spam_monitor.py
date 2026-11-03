@@ -109,7 +109,7 @@ def ai_spam_filter(update: Update) -> bool:
 AI_SPAM_FILTER = ai_spam_filter
 AI_SPAM_CALLBACK_PATTERN = r"^aispam:(del|delres|delban|dismiss):-?\d+:\d+:\d+$"
 
-AI_SPAM_MIN_LENGTH = 20
+AI_SPAM_MIN_LENGTH = 10
 AI_SPAM_ALERT_MESSAGE_MAX_LEN = 500
 AI_SPAM_CLASSIFY_MAX_LEN = 8000
 
